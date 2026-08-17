@@ -71,6 +71,26 @@ evidence.
 | Privacy loss | remove reconstruction / retrieval / attribute / joint | Which mechanism contributes? |
 | Attacker | weak/strong, data-size sweep, same/cross source | Does privacy rely on a weak attacker? |
 
+## Frozen backbone and representation-width matrix
+
+Backbone size and released representation width are separate axes. A larger
+native vector is not counted as a privacy bottleneck, and a comparison across
+different backbone sizes is not used to claim a benefit from compression.
+
+| Family | Frozen variants | Native output width |
+| --- | --- | ---: |
+| DINOv3 ViT | S/16, S+/16, B/16, L/16, H+/16, 7B/16 | 384, 384, 768, 1024, 1280, 4096 |
+| DINOv3 ConvNeXt | Tiny, Small, Base, Large | 768, 768, 1024, 1536 |
+| DINOv3 pretraining domain | LVD-1689M; SAT-493M for L and 7B | matched architecture where available |
+| DINOv2 control | S/14, B/14, L/14, G/14 | 384, 768, 1024, 1536 |
+
+The pilot runs matched-capacity pairs first: DINOv2-B versus DINOv3-B, then
+DINOv2-L versus DINOv3-L. S/S+, H+, 7B, ConvNeXt, and SAT variants are
+backbone-scale/domain ablations and cannot be selected from outer-test scores.
+For transformer backbones, CLS and mean patch-token pooling are both reported.
+For every selected frozen backbone, the privacy-release axis is
+`4/8/16/32/64/128/raw` dimensions with identical inner-CV trial budgets.
+
 ## Gates
 
 1. Gate A remains partial until all nine samples have spatial and visible-indent
