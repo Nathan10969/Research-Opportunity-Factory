@@ -1,0 +1,48 @@
+{
+  "status": "partial",
+  "schema_version": "pnnl-gate-a-precheck-v1",
+  "source": {
+    "tar_sha256_remote_local_consistency": "b89f394dc565ecf9aff47fb54985e0237b7aba86781dd1d8caa29065f30afc1c",
+    "independent_repository_checksum": false,
+    "contract_files_verified": 8,
+    "contract_hash_errors": 0,
+    "whitelisted_members_expected": 9,
+    "whitelisted_members_extracted": 9,
+    "extracted_bytes": 772803272,
+    "forbidden_members_extracted": 0
+  },
+  "labels": {
+    "eligible_hardness_bindings": 21513,
+    "independent_samples": 9,
+    "outer_split": "9-fold leave-one-sample-out",
+    "outer_sample_overlap": 0
+  },
+  "geometry_precheck": {
+    "policy": "image bounds plus fixed bottom 6 percent metadata exclusion",
+    "crop_0_5_mm_geometry_valid": 8940,
+    "crop_1_0_mm_geometry_valid": 8375,
+    "crop_2_0_mm_geometry_valid": 7164,
+    "invalid_points_are_not_clipped_or_repaired": true
+  },
+  "provisional_material_mask_precheck": {
+    "status": "diagnostic_not_frozen",
+    "method": "one-eighth grayscale preview; intensity above 20; at least 95 percent material pixels",
+    "crop_0_5_mm_material_safe": 7336,
+    "crop_1_0_mm_material_safe": 6762,
+    "crop_2_0_mm_material_safe": 5712
+  },
+  "visual_qa": {
+    "global_thumbnails_reviewed": 9,
+    "representative_local_crops_reviewed": 81,
+    "obvious_burned_in_metadata_in_local_crops": 0,
+    "obvious_vickers_diamond_indents_in_reviewed_crops": 0,
+    "full_visible_indent_audit_complete": false,
+    "background_intersections_observed": true
+  },
+  "gate_a": {
+    "decision": "partial_continue_cpu_qa",
+    "reason": "source and split gates pass, but material-mask and full visible-indent QA are not frozen",
+    "model_training_authorized": false,
+    "gpu_feature_extraction_authorized": false
+  }
+}
