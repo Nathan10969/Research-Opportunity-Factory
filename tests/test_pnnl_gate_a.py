@@ -21,6 +21,7 @@ from pnnl_pilot.cleaning import (
     assert_training_path,
 )
 from pnnl_pilot.metrics import sample_balanced_mae
+from pnnl_pilot.background import build_material_mask, material_fraction_for_box
 from pnnl_pilot.spatial import CropGeometryError, crop_box_for_mm, project_mm_to_pixel
 from pnnl_pilot.splits import build_loso_folds
 
@@ -132,6 +133,20 @@ class CleaningTests(unittest.TestCase):
             with self.subTest(path=path):
                 with self.assertRaises(ContaminatedInput):
                     assert_training_path(path)
+
+    def test_material_fraction_rejects_black_background(self):
+        image = Image.new("L", (100, 100), 100)
+        for y in range(20):
+            for x in range(100):
+                image.putpixel((x, y), 0)
+        mask = build_material_mask(image, intensity_threshold=20)
+        self.assertAlmostEqual(material_fraction_for_box(mask, (0, 0, 100, 100)), 0.8)
+        self.assertEqual(material_fraction_for_box(mask, (0, 20, 100, 100)), 1.0)
+
+    def test_material_fraction_rejects_empty_box(self):
+        mask = build_material_mask(Image.new("L", (10, 10), 100))
+        with self.assertRaises(ValueError):
+            material_fraction_for_box(mask, (3, 3, 3, 8))
 
 
 class SpatialTests(unittest.TestCase):

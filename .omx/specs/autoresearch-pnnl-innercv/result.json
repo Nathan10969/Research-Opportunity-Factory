@@ -1,0 +1,6 @@
+{
+  "status": "blocked_by_gate_a",
+  "passed": false,
+  "summary": "Autoresearch protocol is frozen but tuning is not authorized until Gate A passes.",
+  "output_artifact_path": null
+}

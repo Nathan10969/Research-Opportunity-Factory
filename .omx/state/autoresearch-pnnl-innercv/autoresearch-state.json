@@ -1,0 +1,9 @@
+{
+  "slug": "pnnl-innercv",
+  "validation_mode": "mission-validator-script",
+  "completion_artifact_path": ".omx/specs/autoresearch-pnnl-innercv/result.json",
+  "mission_validator_command": "python scripts/validate_pnnl_autoresearch.py",
+  "output_artifact_path": "evidence/pnnl_autoresearch/final_report.json",
+  "activation_gate": "evidence/pnnl_gate_a/validation_report.json:status=passed",
+  "active": false
+}
