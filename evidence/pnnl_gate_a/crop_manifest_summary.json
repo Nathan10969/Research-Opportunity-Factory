@@ -1,0 +1,27 @@
+{
+  "eligible_for_model": 0,
+  "minimum_material_fraction": 0.99,
+  "output": "F:\\rookie\\Noname\\data\\derived\\pnnl_gate_a\\crop_manifest.csv",
+  "output_bytes": 8204860,
+  "output_sha256": "a111b1e48fff81c05bdc9c3fa187eea61cfb244ce5f1660e0715504d4c09e427",
+  "rows": 64539,
+  "samples": 9,
+  "schema_version": "pnnl-crop-manifest-summary-v1",
+  "status": "generated_pending_indent_qa",
+  "status_counts": {
+    "background_contaminated": 5024,
+    "geometry_invalid": 40060,
+    "material_safe_pending_indent_qa": 19455
+  },
+  "status_counts_by_scale": {
+    "0.5mm:background_contaminated": 1636,
+    "0.5mm:geometry_invalid": 12573,
+    "0.5mm:material_safe_pending_indent_qa": 7304,
+    "1.0mm:background_contaminated": 1695,
+    "1.0mm:geometry_invalid": 13138,
+    "1.0mm:material_safe_pending_indent_qa": 6680,
+    "2.0mm:background_contaminated": 1693,
+    "2.0mm:geometry_invalid": 14349,
+    "2.0mm:material_safe_pending_indent_qa": 5471
+  }
+}

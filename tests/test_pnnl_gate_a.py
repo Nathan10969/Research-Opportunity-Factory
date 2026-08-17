@@ -21,7 +21,16 @@ from pnnl_pilot.cleaning import (
     assert_training_path,
 )
 from pnnl_pilot.metrics import sample_balanced_mae
-from pnnl_pilot.background import build_material_mask, material_fraction_for_box
+from pnnl_pilot.background import (
+    DownsampledMaterialIndex,
+    build_material_mask,
+    material_fraction_for_box,
+)
+from pnnl_pilot.manifest import (
+    GateNotPassed,
+    authorize_crop_row,
+    evaluate_crop_candidate,
+)
 from pnnl_pilot.spatial import CropGeometryError, crop_box_for_mm, project_mm_to_pixel
 from pnnl_pilot.splits import build_loso_folds
 
@@ -148,6 +157,15 @@ class CleaningTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             material_fraction_for_box(mask, (3, 3, 3, 8))
 
+    def test_downsampled_material_index_maps_original_boxes(self):
+        preview = Image.new("L", (50, 50), 100)
+        for y in range(10):
+            for x in range(50):
+                preview.putpixel((x, y), 0)
+        index = DownsampledMaterialIndex(preview, original_size=(100, 100))
+        self.assertAlmostEqual(index.fraction((0, 0, 100, 100)), 0.8)
+        self.assertEqual(index.fraction((0, 20, 100, 100)), 1.0)
+
 
 class SpatialTests(unittest.TestCase):
     def test_projection_uses_image_y_axis_direction(self):
@@ -159,6 +177,43 @@ class SpatialTests(unittest.TestCase):
         self.assertEqual(crop_box_for_mm(500, 400, 1.0, 100, 1000, 800, 760), (450, 350, 550, 450))
         with self.assertRaises(CropGeometryError):
             crop_box_for_mm(500, 740, 1.0, 100, 1000, 800, 760)
+
+    def test_crop_candidate_requires_geometry_and_material(self):
+        binding = {
+            "hardness_point_id": "P1",
+            "sample_id": "SS01",
+            "condition_id": "C03",
+            "x_rel_stir_mm": "0",
+            "y_rel_stir_mm": "0",
+            "hardness_hv": "220",
+            "image_center_u_px": "500",
+            "image_center_v_px": "400",
+            "rotation_deg": "0",
+            "scale_px_per_mm": "100",
+        }
+        accepted = evaluate_crop_candidate(
+            binding, 0.5, (1000, 800), 760, lambda box: 1.0
+        )
+        rejected = evaluate_crop_candidate(
+            binding, 0.5, (1000, 800), 760, lambda box: 0.5
+        )
+        self.assertEqual(accepted.status, "material_safe_pending_indent_qa")
+        self.assertEqual(rejected.status, "background_contaminated")
+        self.assertFalse(accepted.eligible_for_model)
+
+    def test_crop_authorization_requires_passed_gate(self):
+        row = {"status": "material_safe_pending_indent_qa", "crop_id": "C1"}
+        with self.assertRaises(GateNotPassed):
+            authorize_crop_row(row, {"status": "partial"})
+        authorized = authorize_crop_row(row, {"status": "passed"})
+        self.assertEqual(authorized["status"], "eligible_region_level")
+        self.assertTrue(authorized["eligible_for_model"])
+
+    def test_crop_authorization_does_not_rescue_rejected_rows(self):
+        row = {"status": "background_contaminated", "crop_id": "C1"}
+        authorized = authorize_crop_row(row, {"status": "passed"})
+        self.assertEqual(authorized["status"], "background_contaminated")
+        self.assertFalse(authorized["eligible_for_model"])
 
 
 class SplitAndMetricTests(unittest.TestCase):

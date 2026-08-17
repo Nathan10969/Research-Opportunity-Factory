@@ -1,0 +1,29 @@
+{
+  "status": "provisional_pass",
+  "schema_version": "pnnl-visible-indent-audit-v1",
+  "scope": {
+    "crop_scale_mm": 0.5,
+    "material_safe_centers_screened": 7304,
+    "samples": 9,
+    "darkest_center_candidates_visually_reviewed": 81,
+    "reviewed_per_sample": 9
+  },
+  "center_darkness_diagnostic": {
+    "method": "48x48 center mean minus mean of four 48x48 windows offset by 72 pixels",
+    "interpretation": "a negative value indicates a darker center than its local neighbors",
+    "by_sample": {
+      "SS01": {"n": 719, "median": 0.019, "p05": -3.995, "p95": 3.814},
+      "SS02": {"n": 2178, "median": 0.030, "p05": -4.527, "p95": 4.224},
+      "SS03": {"n": 350, "median": 0.209, "p05": -4.602, "p95": 4.045},
+      "SS04": {"n": 328, "median": 0.345, "p05": -4.255, "p95": 4.698},
+      "SS05": {"n": 2294, "median": -0.049, "p05": -3.893, "p95": 3.949},
+      "SS06": {"n": 363, "median": -0.086, "p05": -5.097, "p95": 4.831},
+      "SS07": {"n": 368, "median": 0.162, "p05": -5.133, "p95": 4.734},
+      "SS08": {"n": 365, "median": 0.341, "p05": -4.494, "p95": 4.390},
+      "SS31": {"n": 339, "median": 0.066, "p05": -4.423, "p95": 5.156}
+    }
+  },
+  "visual_finding": "No obvious regular Vickers diamond indent was seen in the 81 darkest-center candidates; reviewed dark regions were consistent with microstructural contrast, boundaries, scratches, or defects.",
+  "limitation": "This screen does not prove indent absence and does not validate the approximate optical-to-hardness transform.",
+  "model_training_authorized": false
+}

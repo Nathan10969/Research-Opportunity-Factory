@@ -1,0 +1,26 @@
+{
+  "all_rows_authorized": true,
+  "input_sha256": "a111b1e48fff81c05bdc9c3fa187eea61cfb244ce5f1660e0715504d4c09e427",
+  "output_bytes": 2744932,
+  "output_sha256": "cc7eca9912621d99cffe4e42094e7c9963a134273f4ec2786e343413a2729d7b",
+  "rows": 19455,
+  "rows_by_scale": {
+    "0.5": 7304,
+    "1.0": 6680,
+    "2.0": 5471
+  },
+  "samples": [
+    "SS01",
+    "SS02",
+    "SS03",
+    "SS04",
+    "SS05",
+    "SS06",
+    "SS07",
+    "SS08",
+    "SS31"
+  ],
+  "schema_version": "pnnl-model-manifest-summary-v1",
+  "status": "passed",
+  "unique_crop_ids": 19455
+}

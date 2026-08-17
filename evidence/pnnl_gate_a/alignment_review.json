@@ -1,0 +1,20 @@
+{
+  "status": "accepted_region_level",
+  "schema_version": "pnnl-alignment-review-v1",
+  "samples_reviewed": [
+    "SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS31"
+  ],
+  "review_basis": [
+    "source-provided optical stir center, rotation, and 1704.5 px/mm scale",
+    "nine generated whole-section coordinate overlays",
+    "81 representative local crops",
+    "81 darkest-center candidates from the systematic visible-indent screen"
+  ],
+  "finding": "For all nine samples, the projected grid is centered and rotated consistently with the visible stir/nugget region. Points outside the specimen or inside the metadata band are excluded by the frozen geometry and material-mask rules.",
+  "acceptance_scope": "region-level image-to-hardness association only",
+  "not_claimed": "pixel-exact registration to an individual hardness indent",
+  "frozen_primary_crop_scale_mm": 1.0,
+  "required_scale_sensitivity_mm": [0.5, 2.0],
+  "required_registration_jitter_ablation_mm": [0.25, 0.5],
+  "contact_sheet_sha256": "eddbbae3c77e12f684189a3150ed60137539bb544c5a9532d33c0e7b1782a6c7a"
+}

@@ -30,7 +30,10 @@ and the same `crop_id`, `sample_id`, `outer_fold`, and cleaning-policy version.
 - outer evaluation: 9-fold leave-one-Sample-ID-out;
 - primary utility metrics: sample-balanced MAE and RMSE;
 - coordinate-only comparison and Gate 1 kill criterion;
-- crop scales 0.5/1.0/2.0 mm as a reported sensitivity axis;
+- primary crop scale: 1.0 mm, frozen before feature extraction because the
+  source registration is region-level rather than pixel-exact;
+- crop scales 0.5/2.0 mm as reported sensitivity axes;
+- coordinate-jitter robustness at 0.25/0.5 mm in four cardinal directions;
 - outer test samples never select preprocessing, dimensions, heads, or attacks.
 
 ## Inner-CV tuning budget
@@ -59,6 +62,7 @@ evidence.
 | Input | coordinate-only / image-only / image+coordinate | Does the image add real utility? |
 | Contamination | raw diagnostic / metadata-safe / center-mask | Is performance caused by text, scale bars, or indents? |
 | Physical scale | 0.5 / 1.0 / 2.0 mm | Which spatial scale carries utility/leakage? |
+| Registration | no jitter / 0.25 mm / 0.5 mm cardinal jitter | Does utility survive source registration uncertainty? |
 | Representation | raw DINO / PCA / random projection / random deletion / RF-topK / AE / VIB / proposed | Is the method better than ordinary compression? |
 | Released dimension | 4 / 8 / 16 / 32 / 64 | Full privacy–utility Pareto curve |
 | Capacity | matched dimension and matched rank | Is any gain more than capacity reduction? |

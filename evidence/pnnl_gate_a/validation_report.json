@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "schema_version": "pnnl-gate-a-validation-v1",
+  "checks": {
+    "source_integrity": "passed",
+    "eligible_sample_whitelist": "passed",
+    "outer_loso_sample_overlap": 0,
+    "metadata_exclusion": "passed",
+    "geometry_and_background_manifest": "passed",
+    "visible_indent_screen": "passed_with_center_mask_ablation_required",
+    "optical_to_hardness_alignment": "accepted_for_region_level_only"
+  },
+  "artifacts": {
+    "crop_manifest_summary": "evidence/pnnl_gate_a/crop_manifest_summary.json",
+    "indentation_audit_summary": "evidence/pnnl_gate_a/indentation_audit_summary.json",
+    "alignment_overlay_manifest": "evidence/pnnl_gate_a/alignment_overlay_manifest.csv",
+    "alignment_review": "evidence/pnnl_gate_a/alignment_review.json",
+    "split_manifest": "evidence/pnnl_gate_a/split_manifest.csv"
+  },
+  "decision": {
+    "cpu_qa_authorized": true,
+    "gpu_feature_extraction_authorized": true,
+    "model_training_authorized": true,
+    "autoresearch_active": true
+  },
+  "scope_limit": "Authorization is for region-level prediction with 1.0 mm primary crops. Pixel-exact indentation claims are forbidden; 0.5/2.0 mm scale sensitivity, center masking, and 0.25/0.5 mm registration-jitter ablations are mandatory."
+}
