@@ -1,6 +1,9 @@
 {
-  "status": "blocked_by_gate_a",
+  "failed_checks": [
+    "final_report_present"
+  ],
+  "final_report": "F:\\rookie\\Noname\\evidence\\pnnl_autoresearch\\final_report.json",
+  "gate_a_report": "F:\\rookie\\Noname\\evidence\\pnnl_gate_a\\validation_report.json",
   "passed": false,
-  "summary": "Autoresearch protocol is frozen but tuning is not authorized until Gate A passes.",
-  "output_artifact_path": null
+  "status": "missing_final_report"
 }

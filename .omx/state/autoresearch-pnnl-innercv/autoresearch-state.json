@@ -5,5 +5,5 @@
   "mission_validator_command": "python scripts/validate_pnnl_autoresearch.py",
   "output_artifact_path": "evidence/pnnl_autoresearch/final_report.json",
   "activation_gate": "evidence/pnnl_gate_a/validation_report.json:status=passed",
-  "active": false
+  "active": true
 }
