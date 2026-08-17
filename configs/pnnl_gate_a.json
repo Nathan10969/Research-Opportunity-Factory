@@ -1,0 +1,16 @@
+{
+  "schema_version": "pnnl-gate-a-v1",
+  "source_tar": "D:/rookie/rookie/public_candidate_datasets_20260816/04_pnnl_mcpc_round1/mcpc_characterization_round1.tar",
+  "external_contract_root": "D:/rookie/rookie/research_data/pnnl_binding_contract",
+  "derived_root": "F:/rookie/Noname/data/derived/pnnl_gate_a",
+  "evidence_root": "F:/rookie/Noname/evidence/pnnl_gate_a",
+  "eligible_samples": ["SS01", "SS02", "SS03", "SS04", "SS05", "SS06", "SS07", "SS08", "SS31"],
+  "quarantined_samples": ["SS28", "SS32"],
+  "control_only_samples": ["SS36"],
+  "allowed_member_suffix": "_10X_Nugget-Region-Etched.jpg",
+  "required_member_segment": "/DATA/",
+  "forbidden_member_segments": ["/VISUALIZATION/MARKER/", "/VISUALIZATION/crop-7mm/"],
+  "crop_sizes_mm": [0.5, 1.0, 2.0],
+  "outer_split": "leave-one-sample-out",
+  "gate_a_requires_human_qa": true
+}

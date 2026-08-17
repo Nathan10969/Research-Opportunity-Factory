@@ -1,0 +1,13 @@
+sample_id,condition_id,dataset_status_summary,trainability_state,trainability_reason,cross_modal_join_key
+SS01,C03,"Normal | Tool pin was chipped after this run. It is unclear exactly where",eligible_with_warning,source records a tool-condition warning,SS01
+SS02,C05,"Normal | Tool pin was chipped after this run. It is unclear exactly where",eligible_with_warning,source records a tool-condition warning,SS02
+SS03,C06,"Normal | Tool pin was chipped after this run. It is unclear exactly where",eligible_with_warning,source records a tool-condition warning,SS03
+SS04,C07,"Ok: Tool break AFTER sample | Tool pin was chipped after this run. It is unclear exactly where",eligible_with_warning,source records a tool-condition warning,SS04
+SS05,C08,Normal,eligible,source metadata does not mark the sample invalid,SS05
+SS06,C09,Normal,eligible,source metadata does not mark the sample invalid,SS06
+SS07,C10,Normal,eligible,source metadata does not mark the sample invalid,SS07
+SS08,C11,Normal,eligible,source metadata does not mark the sample invalid,SS08
+SS28,C02,Invalid | Possible tool break during SS27,quarantined,source metadata marks at least one modality record Invalid,SS28
+SS31,C01,Ok: Tool break AFTER sample | Possible Tool break during SS32,eligible_with_warning,source records a tool-condition warning,SS31
+SS32,C04,Invalid | Possible Tool break during SS32,quarantined,source metadata marks at least one modality record Invalid,SS32
+SS36,C00,Initial Curation Complete: Valid data,control_only,unprocessed control; no valid hardness target in Round 1,SS36

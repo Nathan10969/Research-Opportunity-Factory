@@ -1,0 +1,36 @@
+# External or derived data
+data/raw/
+data/derived/
+runs/
+checkpoints/
+embeddings/
+
+# Large containers and model artifacts
+*.tar
+*.tar.gz
+*.zip
+*.7z
+*.pth
+*.pt
+*.ckpt
+*.npy
+*.npz
+
+# Credentials and machine-local configuration
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
