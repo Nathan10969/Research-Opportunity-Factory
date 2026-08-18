@@ -1,0 +1,204 @@
+{
+  "artifact_paths": {
+    "inner_cv_trials": "/mnt/f/rookie/Noname/data/derived/pnnl_gate_a/experiments/nested_loso_dinov3b_1mm/inner_cv_trials.csv",
+    "per_fold_results": "/mnt/f/rookie/Noname/data/derived/pnnl_gate_a/experiments/nested_loso_dinov3b_1mm/per_fold_results.csv",
+    "per_seed_results": "/mnt/f/rookie/Noname/data/derived/pnnl_gate_a/experiments/nested_loso_dinov3b_1mm/per_seed_results.csv",
+    "predictions": "/mnt/f/rookie/Noname/data/derived/pnnl_gate_a/experiments/nested_loso_dinov3b_1mm/predictions.csv",
+    "run_summary": "/mnt/f/rookie/Noname/data/derived/pnnl_gate_a/experiments/nested_loso_dinov3b_1mm/summary.json"
+  },
+  "completed_jobs": 135,
+  "configuration_provenance_present": true,
+  "equal_trial_budget": true,
+  "expected_jobs": 135,
+  "inner_group_cv": true,
+  "missing_jobs": [],
+  "outer_sample_overlap": 0,
+  "outer_test_used_for_selection": false,
+  "overall_results": [
+    {
+      "model": "ridge",
+      "representation": "coordinate",
+      "sample_balanced_mae": 26.533120574457524,
+      "sample_balanced_rmse": 31.059118347058043
+    },
+    {
+      "model": "ridge",
+      "representation": "image_cls",
+      "sample_balanced_mae": 21.4833075241979,
+      "sample_balanced_rmse": 27.198386427883502
+    },
+    {
+      "model": "ridge",
+      "representation": "image_mean_patch",
+      "sample_balanced_mae": 21.306524349109928,
+      "sample_balanced_rmse": 27.13807241852307
+    },
+    {
+      "model": "ridge",
+      "representation": "fusion_cls",
+      "sample_balanced_mae": 20.917873683554845,
+      "sample_balanced_rmse": 26.18948987723674
+    },
+    {
+      "model": "ridge",
+      "representation": "fusion_mean_patch",
+      "sample_balanced_mae": 21.113631537016047,
+      "sample_balanced_rmse": 26.45098598786884
+    },
+    {
+      "model": "elastic_net",
+      "representation": "coordinate",
+      "sample_balanced_mae": 26.53323563549008,
+      "sample_balanced_rmse": 31.05900687739343
+    },
+    {
+      "model": "elastic_net",
+      "representation": "image_cls",
+      "sample_balanced_mae": 21.09179847957064,
+      "sample_balanced_rmse": 26.961241572448802
+    },
+    {
+      "model": "elastic_net",
+      "representation": "image_mean_patch",
+      "sample_balanced_mae": 20.809263264385017,
+      "sample_balanced_rmse": 26.793531019232685
+    },
+    {
+      "model": "elastic_net",
+      "representation": "fusion_cls",
+      "sample_balanced_mae": 20.656463054787697,
+      "sample_balanced_rmse": 25.746616814484085
+    },
+    {
+      "model": "elastic_net",
+      "representation": "fusion_mean_patch",
+      "sample_balanced_mae": 21.06357220427304,
+      "sample_balanced_rmse": 26.174794439694708
+    },
+    {
+      "model": "random_forest",
+      "representation": "coordinate",
+      "sample_balanced_mae": 17.689008860105147,
+      "sample_balanced_rmse": 22.027881945786785
+    },
+    {
+      "model": "random_forest",
+      "representation": "image_cls",
+      "sample_balanced_mae": 21.19690430358383,
+      "sample_balanced_rmse": 26.82656276188802
+    },
+    {
+      "model": "random_forest",
+      "representation": "image_mean_patch",
+      "sample_balanced_mae": 20.62207831092163,
+      "sample_balanced_rmse": 26.182060171134744
+    },
+    {
+      "model": "random_forest",
+      "representation": "fusion_cls",
+      "sample_balanced_mae": 15.504035211185023,
+      "sample_balanced_rmse": 19.536653198164785
+    },
+    {
+      "model": "random_forest",
+      "representation": "fusion_mean_patch",
+      "sample_balanced_mae": 15.520944197094378,
+      "sample_balanced_rmse": 19.43328657509373
+    }
+  ],
+  "per_fold_results_present": true,
+  "per_sample_results_present": true,
+  "per_seed_results_present": true,
+  "primary_gate": {
+    "comparison": "ridge:fusion_mean_patch_vs_coordinate",
+    "improved_samples": 8,
+    "passed": true,
+    "per_sample": {
+      "SS01": {
+        "coordinate_mae": 33.58850745796036,
+        "fusion_mean_patch_mae": 24.73530095498016,
+        "improved": true
+      },
+      "SS02": {
+        "coordinate_mae": 30.512576558646444,
+        "fusion_mean_patch_mae": 19.88950221320925,
+        "improved": true
+      },
+      "SS03": {
+        "coordinate_mae": 26.90323352206285,
+        "fusion_mean_patch_mae": 20.026670176512116,
+        "improved": true
+      },
+      "SS04": {
+        "coordinate_mae": 25.556320541783382,
+        "fusion_mean_patch_mae": 18.509245922690944,
+        "improved": true
+      },
+      "SS05": {
+        "coordinate_mae": 20.303412358375567,
+        "fusion_mean_patch_mae": 27.117482812957405,
+        "improved": false
+      },
+      "SS06": {
+        "coordinate_mae": 22.015860748291015,
+        "fusion_mean_patch_mae": 18.697626046573415,
+        "improved": true
+      },
+      "SS07": {
+        "coordinate_mae": 21.365198756243128,
+        "fusion_mean_patch_mae": 17.30892868265728,
+        "improved": true
+      },
+      "SS08": {
+        "coordinate_mae": 21.17222074295459,
+        "fusion_mean_patch_mae": 16.01690512481413,
+        "improved": true
+      },
+      "SS31": {
+        "coordinate_mae": 37.38075448380036,
+        "fusion_mean_patch_mae": 27.721021898749733,
+        "improved": true
+      }
+    },
+    "required_improved_samples": 6
+  },
+  "provenance": {
+    "feature_report_sha256": "beccab98493ba42ce59c45c9f08fd5986ae410e2231c4f65b19b030398fb3793",
+    "feature_rows_sha256": "b839ae5b5db7dfcc2fed74656a97e647e61dbec8a5171ce2043bb5c61d53fa55",
+    "features_cls_sha256": "8ba0aca609daaeb1f5145c40cb14667f43148feefc9f0e102338dedcbaa56cae",
+    "features_mean_patch_sha256": "be5368947d96f37579a1a145d9711417a2c6baa8092461c5946b82ceb313b1fd",
+    "inner_split": "leave-one-Sample-ID-out on outer training samples",
+    "models": [
+      "ridge",
+      "elastic_net",
+      "random_forest"
+    ],
+    "nested_loso_module_sha256": "f4e5b5a90ad6f20b4c2593102badf33fe27586b03a2616ccb9f2c6bc6db2d408",
+    "numpy": "2.2.6",
+    "outer_split": "leave-one-Sample-ID-out",
+    "primary_gate": "ridge:fusion_mean_patch_vs_coordinate; improve >=6/9",
+    "provenance_hash": "4b13b6761e2832d6e322637ab30c79b6d3a005945b3d5beb663d608c77ec3431",
+    "python": "3.10.20",
+    "representations": [
+      "coordinate",
+      "image_cls",
+      "image_mean_patch",
+      "fusion_cls",
+      "fusion_mean_patch"
+    ],
+    "rf_jobs": 16,
+    "rf_outer_seeds": [
+      17,
+      29,
+      43
+    ],
+    "rf_tuning_seed": 1729,
+    "runner_sha256": "4008a22af71f19de527e1b5851c68582928caedab01b50e12bc272092b72e8cf",
+    "schema_version": "pnnl-nested-loso-v1",
+    "selection_metric": "sample-balanced MAE",
+    "source_manifest_sha256": "a6aea854e3b4f677a1fe30af22eb4b998002e80323337d40c07fee0741d6e67b",
+    "trial_budget_per_model": 6
+  },
+  "schema_version": "pnnl-nested-loso-v1",
+  "status": "passed"
+}

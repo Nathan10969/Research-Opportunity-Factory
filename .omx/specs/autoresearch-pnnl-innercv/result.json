@@ -1,9 +1,17 @@
 {
-  "failed_checks": [
-    "final_report_present"
-  ],
-  "final_report": "F:\\rookie\\Noname\\evidence\\pnnl_autoresearch\\final_report.json",
-  "gate_a_report": "F:\\rookie\\Noname\\evidence\\pnnl_gate_a\\validation_report.json",
-  "passed": false,
-  "status": "missing_final_report"
+  "checks": {
+    "configuration_provenance_present": true,
+    "equal_trial_budget": true,
+    "inner_group_cv": true,
+    "outer_sample_overlap": true,
+    "outer_test_used_for_selection": true,
+    "per_fold_results_present": true,
+    "per_sample_results_present": true,
+    "per_seed_results_present": true
+  },
+  "failed_checks": [],
+  "final_report": "/mnt/f/rookie/Noname/evidence/pnnl_autoresearch/final_report.json",
+  "gate_a_report": "/mnt/f/rookie/Noname/evidence/pnnl_gate_a/validation_report.json",
+  "passed": true,
+  "status": "passed"
 }

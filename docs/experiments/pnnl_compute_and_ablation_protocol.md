@@ -110,3 +110,10 @@ For every selected frozen backbone, the privacy-release axis is
    and must reduce conditional incremental leakage for two attack families.
 4. If matched-capacity PCA/random/bottleneck is equally good, report compression
    rather than a new privacy mechanism.
+
+For the first Gate 1 utility screen, the pre-registered primary comparison is
+Ridge on DINOv3-B mean-patch plus normalized image coordinates versus Ridge on
+normalized image coordinates alone. Improvement is evaluated separately on
+each held-out Sample ID and must occur on at least 6/9 samples. CLS pooling,
+Elastic Net, and Random Forest are reported as robustness analyses and cannot
+replace the primary comparison after outer-fold results are observed.
