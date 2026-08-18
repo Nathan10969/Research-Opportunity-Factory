@@ -20,6 +20,15 @@ Only verified manifests and clean crops are transferred to `/opt/Jony`.
 Classical-model runs remain local; returned GPU embeddings/results carry hashes
 and the same `crop_id`, `sample_id`, `outer_fold`, and cleaning-policy version.
 
+### Runtime placement override (2026-08-18)
+
+The A100 is reserved for the Ahui project. PNNL frozen-backbone extraction is
+therefore running in isolated WSL2 on the local RTX 4090 (24 GB). This changes
+only the execution host, not the frozen data, model, split, tuning, or ablation
+protocol. The first complete primary extraction used official DINOv3-B/16,
+batch size 64, PyTorch 2.6.0+cu124, and records the GPU, official-code commit,
+weight SHA-256, manifest SHA-256, and output hashes in `feature_report.json`.
+
 ## Permanently frozen before modelling
 
 - eligible samples: SS01–SS08 and SS31;
