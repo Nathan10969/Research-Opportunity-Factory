@@ -1,0 +1,9 @@
+{
+  "notes_root": "../notes",
+  "candidate_lists": ["../papers/_domain_rounds/D04_retrieval_memory/note_paths.txt", "../papers/_domain_rounds/D06_compression_kv/note_paths.txt"],
+  "legacy_ledger": "../papers/_ideas/idea_ledger.md",
+  "target_min": 40,
+  "target_max": 60,
+  "allowed_labels": ["KV_CACHE", "LONG_MEMORY", "BRIDGE"],
+  "bridge_regression_slugs": ["2026-cvpr-38739", "2026-iclr-anvkroyplb", "2026-iclr-gzyej2kmow", "2026-iclr-ihqdsqk6qc", "2026-iclr-yjr2jx41qo", "2026-iclr-dyj0gwpjjb", "2026-iclr-rwjef9pdij", "2026-iclr-zhk6nbhrxw"]
+}

@@ -1,0 +1,6 @@
+../notes/paper-a.md
+../notes/paper-a.audit.md
+../notes/paper-kv.md
+../notes/paper-memory.md
+../notes/paper-bridge.md
+../notes/paper-keyword.md
