@@ -577,9 +577,9 @@ class RealBackend:
         from .landscape import build_landscape
         build_landscape(run, reviewed_assignments)
 
-    def emit_opportunity_jobs(self, run: Path, *, prompt: Path, **_: object) -> None:
+    def emit_opportunity_jobs(self, run: Path, *, prompt: Path, reviewed_local_entries: Path | None = None, **_: object) -> None:
         from .opportunities import emit_mining_jobs
-        emit_mining_jobs(run, prompt)
+        emit_mining_jobs(run, prompt, reviewed_local_entries=reviewed_local_entries)
 
     def ingest_opportunities(self, run: Path, *, results: Path, **_: object) -> None:
         from .opportunities import ingest_opportunity_results
@@ -846,10 +846,12 @@ def init_run(run_dir: Path, config_path: Path, *, mode: str = "live", new_run: b
     return run
 
 
-def _execute_unlocked(command: str, run_dir: Path, config_path: Path | None, *, results: Path | None = None, prompt: Path | None = None, reviewed_assignments: Path | None = None, allow_test_ready: bool = False, repository_root: Path | None = None, route_prompt: Path | None = None, review_prompt: Path | None = None, recon_context: Path | None = None, execution_bundle: Path | None = None) -> str:
+def _execute_unlocked(command: str, run_dir: Path, config_path: Path | None, *, results: Path | None = None, prompt: Path | None = None, reviewed_assignments: Path | None = None, reviewed_local_entries: Path | None = None, allow_test_ready: bool = False, repository_root: Path | None = None, route_prompt: Path | None = None, review_prompt: Path | None = None, recon_context: Path | None = None, execution_bundle: Path | None = None) -> str:
     if command not in _TRANSITIONS:
         raise PipelineError(f"unsupported stage command: {command}")
     run = _anchored_run(run_dir)
+    if reviewed_local_entries is not None and command != "emit-opportunity-jobs":
+        raise PipelineError("--reviewed-local-entries is only valid for emit-opportunity-jobs")
     resolved_config_path, config = _config(run, config_path)
     expected, target = _TRANSITIONS[command]
     state = _load_state(run)
@@ -861,6 +863,8 @@ def _execute_unlocked(command: str, run_dir: Path, config_path: Path | None, *, 
     route_prompt = Path(route_prompt).resolve(strict=True) if route_prompt else DEFAULT_PROMPTS["route"]
     review_prompt = Path(review_prompt).resolve(strict=True) if review_prompt else DEFAULT_PROMPTS["review"]
     paths: dict[str, Path | None] = {"results": results, "prompt": selected_prompt, "reviewed_assignments": reviewed_assignments, "recon_context": recon_context, "execution_bundle": execution_bundle}
+    if reviewed_local_entries is not None:
+        paths["reviewed_local_entries"] = reviewed_local_entries
     paths.update(_effective_input_paths(run, command, config))
     if command == "ingest-recon":
         for relpath in (
@@ -882,6 +886,7 @@ def _execute_unlocked(command: str, run_dir: Path, config_path: Path | None, *, 
     kwargs = {
         "config": config, "results": results, "prompt": selected_prompt,
         "reviewed_assignments": reviewed_assignments, "allow_test_ready": allow_test_ready,
+        "reviewed_local_entries": reviewed_local_entries,
         "route_prompt": route_prompt, "review_prompt": review_prompt,
         "repository_root": Path(repository_root).resolve() if repository_root else REPOSITORY_ROOT,
         "recon_context": recon_context, "execution_bundle": execution_bundle,
@@ -896,7 +901,7 @@ def _execute_unlocked(command: str, run_dir: Path, config_path: Path | None, *, 
     return "COMPLETED"
 
 
-def execute(command: str, run_dir: Path, config_path: Path | None, *, results: Path | None = None, prompt: Path | None = None, reviewed_assignments: Path | None = None, allow_test_ready: bool = False, repository_root: Path | None = None, route_prompt: Path | None = None, review_prompt: Path | None = None, recon_context: Path | None = None, execution_bundle: Path | None = None) -> str:
+def execute(command: str, run_dir: Path, config_path: Path | None, *, results: Path | None = None, prompt: Path | None = None, reviewed_assignments: Path | None = None, reviewed_local_entries: Path | None = None, allow_test_ready: bool = False, repository_root: Path | None = None, route_prompt: Path | None = None, review_prompt: Path | None = None, recon_context: Path | None = None, execution_bundle: Path | None = None) -> str:
     """Execute one stage under the run-wide mutation lock."""
 
     run = _anchored_run(run_dir)
@@ -904,6 +909,7 @@ def execute(command: str, run_dir: Path, config_path: Path | None, *, results: P
         return _execute_unlocked(
             command, run, config_path, results=results, prompt=prompt,
             reviewed_assignments=reviewed_assignments,
+            reviewed_local_entries=reviewed_local_entries,
             allow_test_ready=allow_test_ready, repository_root=repository_root,
             route_prompt=route_prompt, review_prompt=review_prompt,
             recon_context=recon_context, execution_bundle=execution_bundle,

@@ -4,8 +4,9 @@ An evidence-preserving pipeline for turning a bounded research corpus into
 falsifiable research opportunities, prior-art residuals, and human-approved
 Idea Packs.
 
-The current pilot targets KV-cache and long-term-memory research. The repository
-name describes the system's actual role: it is an opportunity miner and
+The original pilot targets KV-cache and long-term-memory research. A separate
+bounded D09 human-supervision x D07 distribution-shift pilot is also supported;
+the repository name describes the system's actual role: it is an opportunity miner and
 false-positive firewall, not a claim to be a general autonomous scientist or a
 paradigm-discovery engine.
 
@@ -201,6 +202,26 @@ a smaller target; the pipeline must not manufacture records to reach 30. Run it 
 `prompts/corpus_router_d09_d07.md`; the prompt and source paths are hashed into
 run-local jobs. This is a fresh v2 artifact boundary: v1 router jobs/results
 must not be reused or upgraded in place.
+
+### Reviewed local entries
+
+The optional reviewed-local-entry lane admits a manually AI_PM- or HUMAN-reviewed
+relationship between two distinct papers, without changing the normal three-to-eight
+card lane. Use the existing CLI with a local artifact:
+
+```powershell
+uv run idea-factory emit-opportunity-jobs --run runs/example --reviewed-local-entries inputs/reviewed-local-entries.json
+```
+
+Entries are explicitly bounded as `PAIR_RELATION` or `CROSS_FACET`, select one
+existing operator, and emit at most one job per approved entry. Exact landscape
+hashes, evidence anchors, source scopes, the owned input snapshot, local audit, and
+the cluster-audit marker are replay-checked. A valid local result must support both
+source cards exactly once and carry `LOCAL_RELATION_HYPOTHESIS`; an empty result is
+allowed. See the [reviewed local entry design](docs/superpowers/specs/2026-09-09-reviewed-local-entries-design.md).
+
+This is not automatic empty-cell detection, proof of novelty, or a Human Gate
+decision. It does not claim two scientific survivors or an executed experiment.
 
 ## License
 

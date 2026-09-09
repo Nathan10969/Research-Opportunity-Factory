@@ -11,7 +11,7 @@ from typing import Any, Sequence
 
 from pydantic import ValidationError
 
-from .artifacts import read_jsonl, stable_id, write_jsonl_bundle
+from .artifacts import read_jsonl, stable_id, write_json, write_jsonl_bundle
 from .landscape import (
     ValidatedLandscapeBundle as LandscapeBundle,
     canonical_scope_key,
@@ -30,6 +30,9 @@ OPPORTUNITY_OUTCOME_SCHEMA_VERSION = "idea_factory.opportunity_result_outcome.v2
 _JOB_NAMES = ("mining_jobs.jsonl", "cluster_audit.jsonl")
 _RESULT_NAMES = ("opportunity_candidates.jsonl", "rejected_results.jsonl", "result_outcomes.jsonl")
 _QUALITY_NAMES = ("ready_for_internal_dedup.jsonl", "rejected.jsonl", "opportunity_job_outcomes.jsonl")
+_LOCAL_SNAPSHOT = "reviewed_local_entries.json"
+_LOCAL_AUDIT = "local_entry_audit.jsonl"
+_LOCAL_PROMPT = "\n\nLOCAL_RELATION_HYPOTHESIS: evaluate exactly both source cards once, include each supporting card ID exactly once, preserve separate source scopes, and include LOCAL_RELATION_HYPOTHESIS in inference_flags; an empty opportunities list is allowed."
 
 
 def _canonical_json(value: object) -> str:
@@ -319,12 +322,55 @@ class MiningBundle:
     audit: tuple[dict[str, Any], ...]
 
 
-def emit_mining_jobs(run_dir: Path, prompt_path: Path) -> Path:
+def _local_records(bundle: LandscapeBundle, prompt_text: str, entries: list[dict[str, Any]], artifact_hash: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    summaries = _all_entry_summaries(bundle)
+    jobs: list[dict[str, Any]] = []
+    audit: list[dict[str, Any]] = []
+    for entry in entries:
+        review = entry["review"]
+        audit.append({"schema_version": "idea_factory.local_entry_audit.v1", "entry_id": entry["entry_id"], "status": review["status"], "reason": review["reason"], "artifact_sha256": artifact_hash})
+        if review["status"] != "APPROVED":
+            continue
+        anchors = entry["anchors"]
+        card_ids = [anchor["card_id"] for anchor in anchors]
+        neighbors = [summary for summary in summaries if set(summary["source_card_ids"]).intersection(card_ids) or set(summary["source_card_ids"]).intersection(entry["nearest_prior_card_ids"])]
+        neighbors = sorted({row["neighbor_id"]: row for row in neighbors}.values(), key=lambda row: row["neighbor_id"])
+        basis = {"dimension": "local", "facet": entry["entry_kind"], "normalized_text": entry["proposed_hypothesis"], "scope": "reviewed-local", "scope_key": artifact_hash, "source_card_ids": card_ids, "entry_id": entry["entry_id"]}
+        cluster_id = stable_id("local_opportunity_cluster", artifact_hash, entry["entry_id"])
+        local_prompt = prompt_text + _LOCAL_PROMPT
+        prompt_hash = hashlib.sha256(local_prompt.encode("utf-8")).hexdigest()
+        entry_hash = _canonical_hash(entry)
+        job_id = stable_id("local_opportunity_mining_job", "idea_factory.local_entry_mining_job.v1", cluster_id, entry["operator"], artifact_hash, entry_hash, prompt_hash)
+        jobs.append({"schema_version": MINING_JOB_SCHEMA_VERSION, "job_id": job_id, "cluster_id": cluster_id, "cluster_basis": basis, "operator": entry["operator"], "operator_schedule_version": OPERATOR_SCHEDULE_VERSION, "estimated_external_calls": 1, "calls_per_cluster": 1, "prompt_version": OPPORTUNITY_PROMPT_VERSION, "prompt_sha256": prompt_hash, "prompt_text": local_prompt, "base_prompt_text": prompt_text, "landscape_hashes": bundle.hashes, "local_entry_version": "idea_factory.local_entry_mining_job.v1", "local_entry_id": entry["entry_id"], "local_entry_sha256": entry_hash, "local_entry": entry, "local_entry_artifact_sha256": artifact_hash, "card_ids": card_ids, "cards": [bundle.cards[card_id].model_dump(mode="json") for card_id in card_ids], "neighbor_ids": [row["neighbor_id"] for row in neighbors], "neighbor_summaries": neighbors})
+    jobs.sort(key=lambda row: (row["cluster_id"], row["operator"], row["job_id"]))
+    return jobs, audit
+
+
+def emit_mining_jobs(run_dir: Path, prompt_path: Path, *, reviewed_local_entries: Path | None = None) -> Path:
     bundle = validate_landscape_bundle(run_dir)
     run = bundle.run
     if (run / "quality").exists():
         _owned_dir(run, "quality", create=False)
     opportunities = _owned_dir(run, "opportunities", create=True)
+    local_doc = None
+    local_hash = None
+    if reviewed_local_entries is not None:
+        original_candidate = Path(reviewed_local_entries)
+        if original_candidate.is_symlink():
+            raise ValueError("local-entry input must be an external regular file")
+        candidate = original_candidate.resolve(strict=True)
+        owned_targets = [opportunities / name for name in (*_JOB_NAMES, *_RESULT_NAMES, _LOCAL_SNAPSHOT, _LOCAL_AUDIT)]
+        quality = run / "quality"
+        if quality.exists():
+            owned_targets.extend(quality / name for name in _QUALITY_NAMES)
+        if candidate.is_symlink() or not candidate.is_file() or any(target.is_symlink() for target in owned_targets) or any(target.exists() and candidate.samefile(target) for target in owned_targets):
+            raise ValueError("local-entry input must be an external regular file")
+        from .local_entries import canonical_artifact_sha256, validate_local_entries
+        local_doc = json.loads(candidate.read_text(encoding="utf-8"))
+        validate_local_entries(candidate, bundle)
+        local_hash = canonical_artifact_sha256(local_doc)
+    else:
+        _safe_unlink(opportunities, (_LOCAL_SNAPSHOT, _LOCAL_AUDIT))
     _invalidate_result_and_quality(run, opportunities)
     targets = {"jobs": opportunities / _JOB_NAMES[0], "audit": opportunities / _JOB_NAMES[1]}
     _safe_unlink(opportunities, _JOB_NAMES)
@@ -334,10 +380,21 @@ def emit_mining_jobs(run_dir: Path, prompt_path: Path) -> Path:
             raise ValueError("opportunity prompt is missing or unresolved")
         prompt_text = prompt.read_text(encoding="utf-8")
         jobs, audit = _job_records(bundle, prompt_text)
+        if local_doc is not None:
+            local_jobs, local_audit = _local_records(bundle, prompt_text, validate_local_entries(local_doc, bundle), local_hash)
+            jobs.extend(local_jobs)
+            jobs.sort(key=lambda row: (row["cluster_id"], row["operator"], row["job_id"]))
+            snapshot = opportunities / _LOCAL_SNAPSHOT
+            audit_path = opportunities / _LOCAL_AUDIT
+            write_json(snapshot, local_doc)
+            write_jsonl_bundle({audit_path: local_audit})
+            audit.append({"schema_version": "idea_factory.local_entry_mode.v1", "artifact_sha256": local_hash, "base_prompt_text": prompt_text})
         write_jsonl_bundle({targets["jobs"]: jobs, targets["audit"]: audit})
         return targets["jobs"]
     except BaseException:
         _safe_unlink(opportunities, _JOB_NAMES)
+        if local_doc is not None:
+            _safe_unlink(opportunities, (_LOCAL_SNAPSHOT, _LOCAL_AUDIT))
         raise
 
 
@@ -349,11 +406,46 @@ def validate_mining_job_bundle(run_dir: Path) -> MiningBundle:
     opportunities = _owned_dir(bundle.run, "opportunities", create=False)
     jobs = read_jsonl(_owned_file(opportunities, _JOB_NAMES[0]))
     audit = read_jsonl(_owned_file(opportunities, _JOB_NAMES[1]))
-    prompt_texts = {row.get("prompt_text") for row in [*jobs, *audit]}
+    local_snapshot = opportunities / _LOCAL_SNAPSHOT
+    local_audit_path = opportunities / _LOCAL_AUDIT
+    local_markers = [row for row in audit if row.get("schema_version") == "idea_factory.local_entry_mode.v1"]
+    normal_audit = [row for row in audit if row.get("schema_version") != "idea_factory.local_entry_mode.v1"]
+    local_present = bool(local_markers) or local_snapshot.exists() or local_audit_path.exists() or any(row.get("local_entry_id") for row in jobs)
+    if local_present and (not local_snapshot.is_file() or not local_audit_path.is_file() or len(local_markers) != 1):
+        raise ValueError("local entry snapshot, audit, and marker must be present together")
+    local_doc = None
+    if local_present:
+        from .local_entries import canonical_artifact_sha256, validate_local_entries
+        snapshot_path = _owned_file(opportunities, _LOCAL_SNAPSHOT)
+        validate_local_entries(snapshot_path, bundle)
+        local_doc = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        local_audit = read_jsonl(_owned_file(opportunities, _LOCAL_AUDIT))
+        local_hash = canonical_artifact_sha256(local_doc)
+        marker = local_markers[0]
+        if marker.get("artifact_sha256") != local_hash or type(marker.get("base_prompt_text")) is not str:
+            raise ValueError("local entry mode marker replay mismatch")
+        expected_local_audit = _local_records(bundle, "", validate_local_entries(local_doc, bundle), local_hash)[1]
+        if local_audit != expected_local_audit:
+            raise ValueError("local entry audit replay mismatch")
+    normal_prompt_texts = {row.get("prompt_text") for row in [*jobs, *normal_audit] if not row.get("local_entry_id")}
+    prompt_texts = normal_prompt_texts or {row.get("base_prompt_text") for row in jobs if row.get("local_entry_id")}
     if jobs or audit:
+        marker_prompt = local_markers[0].get("base_prompt_text") if local_markers else None
+        if not prompt_texts and type(marker_prompt) is str:
+            prompt_texts = {marker_prompt}
         if len(prompt_texts) != 1 or type(next(iter(prompt_texts))) is not str:
             raise ValueError("mining jobs and audit have inconsistent prompt snapshots")
-        expected_jobs, expected_audit = _job_records(bundle, next(iter(prompt_texts)))
+        base_prompt = next(iter(prompt_texts))
+        if type(base_prompt) is not str:
+            raise ValueError("mining jobs and audit have no replayable prompt snapshot")
+        if local_doc is not None:
+            base_prompt = next((row.get("base_prompt_text") for row in jobs if row.get("local_entry_id")), base_prompt)
+        expected_jobs, expected_audit = _job_records(bundle, base_prompt)
+        if local_doc is not None:
+            local_jobs, _ = _local_records(bundle, base_prompt, validate_local_entries(local_doc, bundle), local_hash)
+            expected_jobs.extend(local_jobs)
+            expected_jobs.sort(key=lambda row: (row["cluster_id"], row["operator"], row["job_id"]))
+            expected_audit.append({"schema_version": "idea_factory.local_entry_mode.v1", "artifact_sha256": local_hash, "base_prompt_text": base_prompt})
     else:
         expected_jobs = []
         expected_audit = []
@@ -443,6 +535,11 @@ def _project_results(mining: MiningBundle, raw_by_job: dict[str, str]) -> tuple[
                         reason_codes.append("UNKNOWN_SUPPORTING_CARD_ID")
                     if not set(opportunity.nearest_internal_neighbors) <= set(job["neighbor_ids"]):
                         reason_codes.append("UNKNOWN_NEIGHBOR_ID")
+                    if job.get("local_entry_id"):
+                        if len(opportunity.supporting_card_ids) != 2 or set(opportunity.supporting_card_ids) != set(job["card_ids"]):
+                            reason_codes.append("LOCAL_CARD_BINDING_MISMATCH")
+                        if "LOCAL_RELATION_HYPOTHESIS" not in opportunity.inference_flags:
+                            reason_codes.append("MISSING_LOCAL_RELATION_HYPOTHESIS_FLAG")
                     if opportunity.opportunity_id in global_ids:
                         reason_codes.append("DUPLICATE_OPPORTUNITY_ID")
                     if reason_codes:

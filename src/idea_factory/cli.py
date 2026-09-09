@@ -58,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
             stage.add_argument("--results", type=Path)
         if command in prompt_commands:
             stage.add_argument("--prompt", type=Path)
+        if command == "emit-opportunity-jobs":
+            stage.add_argument("--reviewed-local-entries", type=Path)
         if command == "build-landscape":
             stage.add_argument("--reviewed-assignments", type=Path)
         if command == "emit-recon-pack":
@@ -114,6 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 results=getattr(args, "results", None),
                 prompt=getattr(args, "prompt", None),
                 reviewed_assignments=getattr(args, "reviewed_assignments", None),
+                reviewed_local_entries=getattr(args, "reviewed_local_entries", None),
                 allow_test_ready=getattr(args, "allow_test_ready", False),
                 route_prompt=getattr(args, "route_prompt", None),
                 review_prompt=getattr(args, "review_prompt", None),
