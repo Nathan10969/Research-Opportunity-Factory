@@ -39,6 +39,14 @@ An empty generation result is neither a falsification of the proposed relation n
 
 ## Remaining boundaries
 
+### Follow-up pilot checkpoint
+
+The independently replay-validated third scientific revision contains two accepted diagnostic opportunities, two quality-ready records and two deterministic internal-dedup CLEAR decisions. The same 20 cards and 114 edges retain the predecessor's five landscape hashes. All four actual anchor papers are from the D09 intake; this is not a demonstrated D09/D07 cross-source idea. The imported ledger has 35 parsed records and 210 unparsed lines, so CLEAR is not comprehensive semantic deduplication.
+
+**End-to-end continuation remains blocked before recon pack emission.** The PM reproduced `recon query must be nonblank and unique per opportunity` through the pure query generator, without network access. In the existing lexical builder, CONCEPT/GENERIC_SHAPE and MECHANISM/GENERIC_SHAPE both begin with the missing-capability field; MECHANISM/CURRENT_TERMS and FAILURE/GENERIC_SHAPE both begin with the failure field. When either field fills the ten-token budget, those lane queries are identical. This is an inherited query-construction limitation, not an empty literature search or a novelty verdict. It was not changed or bypassed in this local-entry release. The targeted test result above must not be interpreted as a successful end-to-end research pipeline run.
+
+The local feature is code-accepted; no IdeaPack, full firewall clearance, cross-domain scientific success or experiment is certified by this checkpoint.
+
 - AI_PM entry approval is not human approval, independent novelty evidence, or permission to run experiments.
 - Hashes bind review records; they do not authenticate the claimed reviewer or prove semantic correctness.
 - This pilot validates entry plumbing and artifact custody. It does not establish a novel idea, a survivor rate, or field-wide coverage.
