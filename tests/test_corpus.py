@@ -465,8 +465,8 @@ def test_router_jobs_embed_bound_note_prompt_and_schema_without_touching_sources
     first_candidate = candidate_map(candidates)[records[0]["slug"]]
     assert records[0]["schema_version"] == ROUTER_JOB_SCHEMA_VERSION
     assert records[0]["result_schema_version"] == ROUTER_RESULT_SCHEMA_VERSION
-    assert records[0]["note_text"] == first_candidate.note_path.read_text(encoding="utf-8")
-    assert records[0]["prompt_text"] == PROMPT.read_text(encoding="utf-8")
+    assert records[0]["note_text"] == first_candidate.note_path.read_bytes().decode("utf-8")
+    assert records[0]["prompt_text"] == PROMPT.read_bytes().decode("utf-8")
     assert records[0]["prompt_path"] == str(PROMPT.resolve())
     assert records[0]["prompt_sha256"] == PROMPT_SHA256
     assert records[0]["prompt_version"] == PROMPT_VERSION

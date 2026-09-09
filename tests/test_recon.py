@@ -104,8 +104,7 @@ def test_query_pack_has_exactly_eight_stable_queries_per_ready_opportunity(tmp_p
     assert len({row["query_id"] for row in rows}) == 8
 
 
-def test_pure_query_generation_rejects_method_names_and_model_acronyms() -> None:
-    import pytest
+def test_pure_query_generation_allows_method_names_for_retrieval() -> None:
     from idea_factory.recon import generate_recon_queries
 
     opportunity = Opportunity(
@@ -116,12 +115,13 @@ def test_pure_query_generation_rejects_method_names_and_model_acronyms() -> None
         decisive_experiment="Compare recall against cache eviction", supporting_card_ids=["c1"],
         nearest_internal_neighbors=["c2"], scope_compatibility="same scope",
     )
-    with pytest.raises(ValueError, match="method names or model acronyms"):
-        generate_recon_queries(opportunity)
+    queries = generate_recon_queries(opportunity)
+    assert len(queries) == 8
+    assert any("LoRA" in query.query for query in queries)
 
 
 @pytest.mark.parametrize("term", ["Transformer", "transformer", "transformerxl", "transformer-xl", "transformer_xl", "T5", "t5", "GPT2", "gpt2", "gpt-2", "gpt_2", "BERTbase", "LLaMA", "LoRA", "QLoRA", "DPO", "PPO", "FluxNet", "ZXQ"])
-def test_method_firewall_controlled_lexicon_and_style_rules(term: str) -> None:
+def test_retrieval_keeps_legitimate_method_terms(term: str) -> None:
     from idea_factory.recon import generate_recon_queries
 
     opportunity = Opportunity(
@@ -131,8 +131,7 @@ def test_method_firewall_controlled_lexicon_and_style_rules(term: str) -> None:
         alternative_explanation_a="cache eviction", decisive_experiment="Compare recall against cache eviction",
         supporting_card_ids=["c1"], nearest_internal_neighbors=["c2"], scope_compatibility="same scope",
     )
-    with pytest.raises(ValueError, match="controlled deterministic firewall"):
-        generate_recon_queries(opportunity)
+    assert len(generate_recon_queries(opportunity)) == 8
 
 
 def test_method_firewall_allows_explicit_kv_and_rag_domain_terms() -> None:
@@ -161,7 +160,7 @@ def test_method_firewall_stems_do_not_ban_ordinary_plural_words() -> None:
     assert len(generate_recon_queries(opportunity)) == 8
 
 
-def test_method_firewall_covers_inference_flags_before_pack_embedding() -> None:
+def test_retrieval_does_not_embed_audit_inference_flags() -> None:
     from idea_factory.recon import generate_recon_queries
 
     opportunity = Opportunity(
@@ -172,8 +171,9 @@ def test_method_firewall_covers_inference_flags_before_pack_embedding() -> None:
         supporting_card_ids=["c1"], nearest_internal_neighbors=["c2"], scope_compatibility="same memory scope",
         inference_flags=["transformer-derived claim"],
     )
-    with pytest.raises(ValueError, match="controlled deterministic firewall"):
-        generate_recon_queries(opportunity)
+    queries = generate_recon_queries(opportunity)
+    assert len(queries) == 8
+    assert all("transformer-derived" not in query.query for query in queries)
 
 
 def test_terms_notice_is_explicit_and_preflight_never_installs(tmp_path: Path) -> None:
@@ -1153,7 +1153,7 @@ def test_normalization_uses_actual_arxiv_stream_and_preserves_query_coverage(tmp
     assert target_job["query_id"] in evidence[0]["query_ids"]
 
 
-def _emit_normalized_chain(run: Path, config, *, with_evidence: bool):
+def _emit_normalized_chain(run: Path, config, *, with_evidence: bool = True, evidence_title: str = "First prior", evidence_abstract: str = "A useful abstract."):
     import hashlib
     import json
     from idea_factory.artifacts import write_jsonl
@@ -1161,21 +1161,25 @@ def _emit_normalized_chain(run: Path, config, *, with_evidence: bool):
 
     jobs, receipts = _emit_empty_execution_chain(run, config)
     if with_evidence:
-        target_job = next(job for job in jobs if job["source"] == "ARXIV")
-        paper = _arxiv_paper("http://arxiv.org/abs/2501.00001v1", "First prior", "https://arxiv.org/pdf/2501.00001")
-        body = json.dumps({"status": "success", "results_count": 1, "papers": [paper]}).encode()
-        (run / target_job["raw_output_path"]).write_bytes(body)
-        receipt = next(row for row in receipts if row["job_id"] == target_job["job_id"])
-        receipt["status"] = "SUCCESS"; receipt["raw_file_sha256"] = hashlib.sha256(body).hexdigest()
-        receipt["tool_stdout_summary"] = "one result"
+        # Every query has a real SUCCESS receipt.  Normalization intentionally
+        # merges the same canonical paper across lanes/queries, while the
+        # explicit with_evidence=False mode remains the all-empty negative.
+        paper = _arxiv_paper("http://arxiv.org/abs/2501.00001v1", evidence_title, "https://arxiv.org/pdf/2501.00001")
+        paper["summary"] = evidence_abstract
+        for target_job in (job for job in jobs if job["source"] == "ARXIV"):
+            body = json.dumps({"status": "success", "results_count": 1, "papers": [paper]}).encode()
+            (run / target_job["raw_output_path"]).write_bytes(body)
+            receipt = next(row for row in receipts if row["job_id"] == target_job["job_id"])
+            receipt["status"] = "SUCCESS"; receipt["raw_file_sha256"] = hashlib.sha256(body).hexdigest()
+            receipt["tool_stdout_summary"] = "one result"
         write_jsonl(run / "recon" / "execution_receipts.jsonl", receipts)
     normalize_recon_raw(run, config)
 
 
-def _report_result(job: dict[str, object], decision: str, *, evidence: dict[str, object] | None = None, reason: str | None = None) -> str:
+def _report_result(job: dict[str, object], decision: str, *, evidence: dict[str, object] | None = None, reason: str | None = None, include_prior: bool = True) -> str:
     import json
 
-    priors = [] if evidence is None else [{
+    priors = [] if evidence is None or not include_prior else [{
         "paper": evidence["title"], "exact_overlap": "same failure regime",
         "residual_difference": "different control mechanism", "evidence_url_or_id": evidence["evidence_id"],
     }]
@@ -1185,12 +1189,14 @@ def _report_result(job: dict[str, object], decision: str, *, evidence: dict[str,
             "NEAR_PRIOR_WITH_RESIDUAL": f"The normalized prior {evidence['title']} leaves the stated residual." if evidence else "missing evidence",
             "NO_DIRECT_COVERAGE_FOUND": "No direct coverage found under this query pack. This result is bounded to the supplied queries and execution receipts.",
         }[decision]
+    relevant_queries = set() if evidence is None else set(evidence.get("query_ids", []))
+    reviews = [{"query_id": query_id, "status": "RELEVANT" if query_id in relevant_queries else "EMPTY", "relevant_evidence_ids": [evidence["evidence_id"]] if query_id in relevant_queries else [], "reason": "Evidence is relevant to this query." if query_id in relevant_queries else "Provider returned no evidence."} for query_id in job["searched_query_ids"]]
     return json.dumps({
-        "schema_version": "idea_factory.recon_report_result.v1", "job_id": job["job_id"],
+        "schema_version": "idea_factory.recon_report_result.v2", "result_schema_sha256": job["result_schema_sha256"], "job_id": job["job_id"],
         "opportunity_id": job["opportunity_id"], "query_pack_sha256": job["query_pack_sha256"],
         "normalized_evidence_manifest_sha256": job["normalized_evidence_manifest_sha256"],
         "protocol_hash": job["protocol_hash"], "cache_key": job["cache_key"], "searched_query_ids": job["searched_query_ids"],
-        "searched_at": "2026-08-03T11:00:00+08:00", "nearest_priors": priors,
+        "searched_at": "2026-08-03T11:00:00+08:00", "relevance_reviews": reviews, "nearest_priors": priors,
         "decision": decision, "decision_reason": reason,
     })
 
@@ -1205,6 +1211,8 @@ def test_report_jobs_replay_exact_and_contain_no_raw_payloads(tmp_path: Path) ->
     path = emit_recon_report_jobs(run, config)
     jobs = validate_report_jobs(run, config)
     assert len(jobs) == 1
+    assert jobs[0]["result_schema"]["$defs"]
+    assert jobs[0]["result_schema_sha256"]
     serialized = json.dumps(jobs)
     assert "abstract_inverted_index" not in serialized and "raw_result_json" not in serialized and '"papers"' not in serialized
     rows = read_jsonl(path); rows[0]["protocol_hash"] = "0" * 64
@@ -1262,13 +1270,33 @@ def test_full_recon_bundle_accepts_all_three_bounded_decisions(tmp_path: Path) -
 
     for index, decision in enumerate(("COVERED", "NEAR_PRIOR_WITH_RESIDUAL", "NO_DIRECT_COVERAGE_FOUND")):
         case = tmp_path / str(index); case.mkdir()
-        run, config = _build_dedup_run(case); _emit_normalized_chain(run, config, with_evidence=decision != "NO_DIRECT_COVERAGE_FOUND")
+        run, config = _build_dedup_run(case); _emit_normalized_chain(run, config, with_evidence=True)
         jobs_path = emit_recon_report_jobs(run, config); job = read_jsonl(jobs_path)[0]
         evidence = job["evidence"][0] if job["evidence"] else None
         ingest_recon_reports(jobs_path, [_report_result(job, decision, evidence=evidence)], config)
         bundle = validate_recon_bundle(run, config)
         assert bundle["reports"][0]["decision"] == decision
         assert len(bundle["killed"] if decision == "COVERED" else bundle["ready"]) == 1
+
+
+def test_successful_unrelated_evidence_cannot_produce_no_direct_route_ready(tmp_path: Path) -> None:
+    """Transport SUCCESS is not semantic coverage; relevance review is required."""
+    import json
+    from idea_factory.artifacts import read_jsonl
+    from idea_factory.recon import emit_recon_report_jobs, ingest_recon_reports
+
+    run, config = _build_dedup_run(tmp_path)
+    _emit_normalized_chain(run, config, with_evidence=True, evidence_title="Collider phenomenology of hadronic resonances", evidence_abstract="We measure particle production cross sections in proton collisions.")
+    jobs_path = emit_recon_report_jobs(run, config)
+    job = read_jsonl(jobs_path)[0]
+    payload = json.loads(_report_result(job, "NO_DIRECT_COVERAGE_FOUND"))
+    payload["schema_version"] = "idea_factory.recon_report_result.v2"
+    evidence_queries = set(job["evidence"][0]["query_ids"])
+    payload["relevance_reviews"] = [{"query_id": query_id, "status": "IRRELEVANT" if query_id in evidence_queries else "EMPTY", "relevant_evidence_ids": [], "reason": "Physics result is unrelated." if query_id in evidence_queries else "No results."} for query_id in job["searched_query_ids"]]
+    ingest_recon_reports(jobs_path, [json.dumps(payload)], config)
+    assert read_jsonl(run / "recon" / "ready_for_routes.jsonl") == []
+    rejection = read_jsonl(run / "recon" / "rejected.jsonl")[0]
+    assert rejection["error_code"] == "RETRIEVAL_QUALITY_INCOMPLETE"
 
 
 def test_report_rejects_missing_lane_invented_evidence_and_global_novelty(tmp_path: Path) -> None:
@@ -1297,10 +1325,12 @@ def test_no_direct_coverage_uses_closed_literal_reason_without_global_claims(tmp
     from idea_factory.artifacts import read_jsonl
     from idea_factory.recon import emit_recon_report_jobs, ingest_recon_reports
 
-    run, config = _build_dedup_run(tmp_path); _emit_normalized_chain(run, config, with_evidence=False)
+    run, config = _build_dedup_run(tmp_path); _emit_normalized_chain(run, config, with_evidence=True)
     jobs_path = emit_recon_report_jobs(run, config); job = read_jsonl(jobs_path)[0]
     bounded = "no direct coverage found under this query pack; evidence is bounded to these queries"
-    raw = _report_result(job, "NO_DIRECT_COVERAGE_FOUND", reason=f"{bounded}. {global_claim}")
+    # Keep the retrieval gate satisfied; this test is specifically about the
+    # closed literal reason and must not be masked by incomplete relevance.
+    raw = _report_result(job, "NO_DIRECT_COVERAGE_FOUND", evidence=job["evidence"][0], reason=f"{bounded}. {global_claim}")
     ingest_recon_reports(jobs_path, [raw], config)
     error = read_jsonl(run / "recon" / "rejected.jsonl")[0]["error"]
     assert "controlled literal" in error
@@ -1316,7 +1346,7 @@ def test_report_rejects_invented_evidence_reference(tmp_path: Path) -> None:
     raw = json.loads(_report_result(job, "COVERED", evidence=job["evidence"][0]))
     raw["nearest_priors"][0]["evidence_url_or_id"] = "invented-evidence-id"
     ingest_recon_reports(jobs_path, [json.dumps(raw)], config)
-    assert "evidence-bound" in read_jsonl(run / "recon" / "rejected.jsonl")[0]["error"]
+    assert read_jsonl(run / "recon" / "rejected.jsonl")[0]["error_code"] == "PRIOR_RELEVANCE_REQUIRED"
 
 
 def test_rejected_report_outcome_never_persists_raw_secret(tmp_path: Path) -> None:

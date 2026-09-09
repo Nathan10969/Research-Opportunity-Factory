@@ -28,12 +28,13 @@ from .corpus import CorpusRouterConfig
 from .ledger import DEDUP_POLICY_VERSION, validate_dedup_bundle
 from .models import FrozenStrictModel, Opportunity, ReconDecision, ReconQuery
 from .opportunities import _anchored_run, _owned_dir, _owned_file, _safe_unlink
+from .safety import contains_secret
 
 
-QUERY_POLICY_VERSION = "idea_factory.recon_query_policy.v1"
+QUERY_POLICY_VERSION = "idea_factory.recon_query_policy.v2"
 METHOD_FIREWALL_VERSION = "idea_factory.method_model_firewall.v1"
 COMMAND_POLICY_VERSION = "idea_factory.recon_command_policy.v4"
-RECON_PROTOCOL_VERSION = "idea_factory.recon_protocol.v3"
+RECON_PROTOCOL_VERSION = "idea_factory.recon_protocol.v4"
 EXECUTION_CONTEXT_POLICY_VERSION = "idea_factory.recon_execution_context.v5"
 UV_EXECUTABLE_POLICY_VERSION = "idea_factory.uv_executable_identity.v2"
 UNSIGNED_NOTICE_RECORD_KIND = "UNSIGNED_TERMS_NOTIFICATION_RECORD"
@@ -52,6 +53,8 @@ TOOL_OUTPUT_CONTRACTS = {"ARXIV": ARXIV_OUTPUT_CONTRACT, "OPENALEX": OPENALEX_OU
 _LANES = ("CONCEPT", "MECHANISM", "FAILURE", "EVALUATION")
 _VARIANTS = ("CURRENT_TERMS", "GENERIC_SHAPE")
 _MEASURE = re.compile(r"\b(measure|metric|recall|accuracy|latency|loss|rate|error|throughput|evaluate|test)\w*\b", re.I)
+_LEXICAL_TOKEN = re.compile(r"[^\W_]+(?:[-/][^\W_]+)*", re.UNICODE)
+_LEXICAL_STOPWORDS = {"the", "and", "for", "with", "during", "under", "after", "against", "this", "that", "from", "into", "over", "remains", "remain"}
 _NAMED_METHOD = re.compile(r"\b(?:called|named|dubbed)\s+[A-Za-z][A-Za-z0-9_-]*", re.I)
 _METHOD_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9])")
 _CONTROLLED_MODEL_STEM = re.compile(r"^(?:transformer(?:xl|base|large|small|tiny|\d+)|bert(?:base|large|small|tiny|\d+)|gpt\d+|llama\d+|lora\d+|qlora\d+|dpo\d+|ppo\d+)$", re.I)
@@ -64,7 +67,7 @@ _CONTROLLED_METHOD_TERMS = (
 _DOMAIN_TERM_ALLOWLIST = ("kv", "rag")
 METHOD_FIREWALL_POLICY = {
     "version": METHOD_FIREWALL_VERSION,
-    "policy_kind": "deterministic-controlled-vocabulary-and-style-rules",
+    "policy_kind": "retired-for-retrieval-deterministic-audit-policy",
     "controlled_method_terms": list(_CONTROLLED_METHOD_TERMS),
     "domain_term_allowlist": list(_DOMAIN_TERM_ALLOWLIST),
     "named_method_pattern": _NAMED_METHOD.pattern,
@@ -72,7 +75,8 @@ METHOD_FIREWALL_POLICY = {
     "controlled_model_stem_pattern": _CONTROLLED_MODEL_STEM.pattern,
     "controlled_letter_number_model_pattern": _CONTROLLED_LETTER_NUMBER_MODEL.pattern,
     "style_rules": ["unallowlisted-uppercase-acronym-length-at-least-3", "mixed-case-token", "net-or-former-suffix"],
-    "boundary": "deterministic lexical firewall; not semantic omniscience",
+    "status": "RETIRED_FOR_RETRIEVAL",
+    "boundary": "retired for retrieval; retained only as historical provenance metadata",
 }
 METHOD_FIREWALL_POLICY_SHA256 = hashlib.sha256(
     json.dumps(METHOD_FIREWALL_POLICY, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -231,8 +235,23 @@ class _BoundNearestPrior(FrozenStrictModel):
         return value.strip()
 
 
+class _QueryRelevanceReview(FrozenStrictModel):
+    query_id: str
+    status: Literal["RELEVANT", "IRRELEVANT", "EMPTY", "UNAVAILABLE"]
+    relevant_evidence_ids: list[str]
+    reason: str
+
+    @field_validator("query_id", "reason")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if type(value) is not str or not value.strip():
+            raise ValueError("query relevance fields must be nonblank")
+        return value.strip()
+
+
 class _ReportInput(FrozenStrictModel):
-    schema_version: Literal["idea_factory.recon_report_result.v1"]
+    schema_version: Literal["idea_factory.recon_report_result.v2"]
+    result_schema_sha256: str
     job_id: str
     opportunity_id: str
     query_pack_sha256: str
@@ -241,6 +260,7 @@ class _ReportInput(FrozenStrictModel):
     cache_key: str
     searched_query_ids: list[str]
     searched_at: datetime
+    relevance_reviews: list["_QueryRelevanceReview"]
     nearest_priors: list[_BoundNearestPrior]
     decision: ReconDecision
     decision_reason: str
@@ -250,8 +270,6 @@ class _ReportInput(FrozenStrictModel):
         if self.searched_at.tzinfo is None or self.searched_at.utcoffset() is None:
             raise ValueError("searched_at must be timezone-aware")
         return self
-
-
 def normalize_openalex_abstract(index: Mapping[str, object] | None) -> str:
     """Rebuild an OpenAlex inverted abstract without guessing missing tokens."""
     if index is None:
@@ -743,41 +761,31 @@ def validate_execution_context(recon_or_run_dir: Path, *, expected_workspace_roo
 
 def _query_text(opportunity: Opportunity, lane: str, variant: str) -> str:
     x, y, z, f, w, a, test = (opportunity.assumption_x, opportunity.observation_y, opportunity.condition_z, opportunity.failure_f, opportunity.missing_capability_w, opportunity.alternative_explanation_a, opportunity.decisive_experiment)
-    if lane == "CONCEPT":
-        current, generic = f"{x} {w} {z}", f"{x} {z}"
-    elif lane == "MECHANISM":
-        current, generic = f"{f} {w} relation", f"{f} capability relation"
-    elif lane == "FAILURE":
-        current, generic = f"{y} {f} {z}", f"{y} {f}"
-    else:
-        measure = " ".join(_MEASURE.findall(test)) or "evaluation"
-        current, generic = f"{test} {a}", f"{measure} {a} evaluation"
-    return " ".join((current if variant == "CURRENT_TERMS" else generic).split())
+    fields = {
+        "CONCEPT": (x, w, z, y),
+        "MECHANISM": (f, w, x, z),
+        "FAILURE": (y, f, z, a),
+        "EVALUATION": (test, a, y, f),
+    }[lane]
+    # This is only a deterministic lexical draft. It bounds provider queries;
+    # it is not a semantic relevance classifier.
+    selected = fields if variant == "CURRENT_TERMS" else fields[1:]
+    words: list[str] = []
+    for field in selected:
+        for token in _LEXICAL_TOKEN.findall(field):
+            if token.casefold() in _LEXICAL_STOPWORDS or len(token) < 2:
+                continue
+            if token.casefold() not in {word.casefold() for word in words}:
+                words.append(token)
+            if len(words) >= 10:
+                break
+        if len(words) >= 10:
+            break
+    return " ".join(words[:10])
 
 
 def generate_recon_queries(opportunity: Opportunity) -> tuple[ReconQuery, ...]:
-    """Pure exact-4x2 generation after enforcing the Task-7 naming firewall."""
-    fields = (
-        opportunity.assumption_x, opportunity.observation_y, opportunity.condition_z,
-        opportunity.failure_f, opportunity.missing_capability_w,
-        opportunity.alternative_explanation_a, opportunity.decisive_experiment,
-        opportunity.scope_compatibility, *opportunity.inference_flags,
-    )
-    denied = set(_CONTROLLED_METHOD_TERMS); allowed = set(_DOMAIN_TERM_ALLOWLIST)
-    offending: set[str] = set()
-    for value in fields:
-        if _NAMED_METHOD.search(value):
-            offending.add(_NAMED_METHOD.search(value).group(0))  # type: ignore[union-attr]
-        for token in _METHOD_TOKEN.findall(value):
-            folded = token.casefold()
-            if folded in allowed:
-                continue
-            uppercase_count = sum(character.isupper() for character in token)
-            mixed_case = uppercase_count >= 2 and any(character.islower() for character in token)
-            if folded in denied or _CONTROLLED_MODEL_STEM.fullmatch(token) or _CONTROLLED_LETTER_NUMBER_MODEL.fullmatch(token) or (token.isupper() and len(token) >= 3) or mixed_case or folded.endswith(("net", "former")):
-                offending.add(token)
-    if offending:
-        raise ValueError("controlled deterministic firewall rejects method names or model acronyms: " + ", ".join(sorted(offending)))
+    """Pure bounded 4x2 generation; semantic relevance is reviewed downstream."""
     queries: list[ReconQuery] = []
     seen: set[str] = set()
     for lane in _LANES:
@@ -858,7 +866,7 @@ def _query_projections(rows: Sequence[dict[str, Any]], dedup: Mapping[str, Seque
                     "method_firewall_version": METHOD_FIREWALL_VERSION, "method_firewall_policy_sha256": METHOD_FIREWALL_POLICY_SHA256,
             })
     records.sort(key=lambda row: (row["opportunity_id"], _LANES.index(row["lane"]), variants.index(row["variant"])))
-    manifest = {"schema_version": "idea_factory.recon_query_pack_manifest.v1", "query_generation_policy_version": QUERY_POLICY_VERSION, "method_firewall_version": METHOD_FIREWALL_VERSION, "method_firewall_policy_sha256": METHOD_FIREWALL_POLICY_SHA256, "method_firewall_policy": METHOD_FIREWALL_POLICY, "dedup_policy_version": DEDUP_POLICY_VERSION, "dedup_bundle_sha256": _hash(list(dedup["ready"])), "query_pack_sha256": _hash(records), "opportunity_ids": [row["opportunity"].opportunity_id for row in rows], "query_ids": [row["query_id"] for row in records], "opportunity_count": len(rows), "query_count": len(records), "lanes": list(_LANES), "variants": list(variants)}
+    manifest = {"schema_version": "idea_factory.recon_query_pack_manifest.v2", "query_generation_policy_version": QUERY_POLICY_VERSION, "query_generation_semantics": "BOUNDED_LEXICAL_DRAFT_NOT_SEMANTIC_RELEVANCE", "method_firewall_version": METHOD_FIREWALL_VERSION, "method_firewall_policy_sha256": METHOD_FIREWALL_POLICY_SHA256, "method_firewall_policy": METHOD_FIREWALL_POLICY, "dedup_policy_version": DEDUP_POLICY_VERSION, "dedup_bundle_sha256": _hash(list(dedup["ready"])), "query_pack_sha256": _hash(records), "opportunity_ids": [row["opportunity"].opportunity_id for row in rows], "query_ids": [row["query_id"] for row in records], "opportunity_count": len(rows), "query_count": len(records), "lanes": list(_LANES), "variants": list(variants)}
     return records, manifest
 
 
@@ -912,7 +920,10 @@ def _expected_execution_job_templates(pack: Sequence[dict[str, Any]], manifest: 
         for source in ("ARXIV", "OPENALEX"):
             raw_rel = f"recon/raw/{source.lower()}/{query['query_id']}.json"
             if source == "ARXIV":
-                args = ["--query", query["query"], "--max_results", "10"]
+                terms = query["query"].split()[:4 if query["variant"] == "CURRENT_TERMS" else 6]
+                groups = [f'(ti:"{term.replace(chr(34), chr(92)+chr(34))}" OR abs:"{term.replace(chr(34), chr(92)+chr(34))}")' for term in terms]
+                joiner = " AND " if query["variant"] == "CURRENT_TERMS" else " OR "
+                args = ["--query", joiner.join(groups), "--max_results", "10"]
                 command = {"required_skill": "literature_search_arxiv", "max_results": 10, "rate_limit_seconds": 3}
             else:
                 args = ["filter", "works", "--search", query["query"], "--select", "id,doi,display_name,publication_year,authorships,abstract_inverted_index,primary_location", "--per-page", "10"]
@@ -1354,6 +1365,16 @@ def _report_job_projection(pack: QueryPackBundle, normalized: NormalizedEvidence
     protocol_hash = _hash(protocol); jobs: list[dict[str, Any]] = []
     for opportunity_id in pack.manifest["opportunity_ids"]:
         query_ids = [row["query_id"] for row in pack.queries if row["opportunity_id"] == opportunity_id]
+        query_rows = [row for row in pack.queries if row["opportunity_id"] == opportunity_id]
+        if not query_rows:
+            raise ValueError("report job requires at least one query")
+        # The report must evaluate the exact frozen opportunity that generated
+        # the query pack.  Keep both the complete body and its content hash so
+        # a replay cannot silently substitute a different opportunity.
+        opportunity = query_rows[0]["opportunity"]
+        opportunity_sha256 = query_rows[0]["opportunity_sha256"]
+        bindings = normalized.manifest.get("raw_bindings", [])
+        provider_status = {(row.get("query_id"), row.get("source")): row.get("status") for row in bindings}
         lane_query_ids = {lane: [row["query_id"] for row in pack.queries if row["opportunity_id"] == opportunity_id and row["lane"] == lane] for lane in _LANES}
         slim = []
         for row in evidence:
@@ -1362,9 +1383,12 @@ def _report_job_projection(pack: QueryPackBundle, normalized: NormalizedEvidence
             projected = {key: row.get(key) for key in ("evidence_id", "source", "source_id", "title", "year", "doi", "url", "authors", "abstract_text", "query_ids")}
             projected["source_aliases"] = sorted(row.get("source_aliases", []))
             slim.append(projected)
-        cache_key = _hash({"opportunity_id": opportunity_id, "query_ids": query_ids, "evidence_ids": [row["evidence_id"] for row in slim], "protocol_hash": protocol_hash})
+        query_context = [{"query_id": row["query_id"], "lane": row["lane"], "variant": row["variant"], "query": row["query"], "provider_status": {source: provider_status.get((row["query_id"], source), "UNAVAILABLE") for source in ("ARXIV", "OPENALEX")}, "evidence_ids": sorted(item["evidence_id"] for item in slim if row["query_id"] in item.get("query_ids", []))} for row in query_rows]
+        result_schema = _ReportInput.model_json_schema()
+        result_schema_sha256 = _hash(result_schema)
+        cache_key = _hash({"opportunity_id": opportunity_id, "query_ids": query_ids, "evidence_ids": [row["evidence_id"] for row in slim], "query_context": query_context, "result_schema_sha256": result_schema_sha256, "protocol_hash": protocol_hash})
         job_id = stable_id("recon_report", opportunity_id, pack.manifest["query_pack_sha256"], normalized.manifest["normalized_evidence_manifest_sha256"])
-        jobs.append({"schema_version": "idea_factory.recon_report_job.v1", "result_schema_version": "idea_factory.recon_report_result.v1", "job_id": job_id, "opportunity_id": opportunity_id, "query_pack_sha256": pack.manifest["query_pack_sha256"], "normalized_evidence_manifest_sha256": normalized.manifest["normalized_evidence_manifest_sha256"], "protocol": protocol, "protocol_hash": protocol_hash, "cache_key": cache_key, "searched_query_ids": query_ids, "lane_query_ids": lane_query_ids, "evidence": slim, "prompt": f"Use only the supplied normalized evidence. Return one strict recon report object; raw JSON is forbidden. NO_DIRECT_COVERAGE_FOUND requires this exact reason: {NO_DIRECT_COVERAGE_REASON}", "raw_json_forbidden": True})
+        jobs.append({"schema_version": "idea_factory.recon_report_job.v2", "result_schema_version": "idea_factory.recon_report_result.v2", "result_schema": result_schema, "result_schema_sha256": result_schema_sha256, "job_id": job_id, "opportunity_id": opportunity_id, "opportunity": opportunity, "opportunity_sha256": opportunity_sha256, "query_pack_sha256": pack.manifest["query_pack_sha256"], "normalized_evidence_manifest_sha256": normalized.manifest["normalized_evidence_manifest_sha256"], "protocol": protocol, "protocol_hash": protocol_hash, "cache_key": cache_key, "searched_query_ids": query_ids, "lane_query_ids": lane_query_ids, "query_context": query_context, "evidence": slim, "prompt": f"Evaluate relevance against the supplied opportunity exactly as frozen. Review every query exactly once, using that query's lane and evidence only. Return relevance_reviews with query_id, status (RELEVANT/IRRELEVANT/EMPTY/UNAVAILABLE), relevant_evidence_ids, and a non-empty reason. Semantic relevance is a model/operator judgment; do not infer it from transport status. Use only the supplied normalized evidence. Raw JSON is forbidden. NO_DIRECT_COVERAGE_FOUND requires this exact reason: {NO_DIRECT_COVERAGE_REASON}", "raw_json_forbidden": True})
     return jobs
 
 
@@ -1396,7 +1420,75 @@ _REPORT_REJECTION_REASONS = {
     "NO_DIRECT_COVERAGE_FOUND must use the controlled literal reason exactly": "NO_DIRECT_REASON_INVALID",
     "covered and near-prior decisions require evidence": "PRIOR_EVIDENCE_REQUIRED",
     "covered or near-prior decision reason must name its evidence-bound prior": "PRIOR_REASON_UNBOUND",
+    "relevance reviews must exactly cover each query once": "RELEVANCE_REVIEW_INVALID",
+    "relevance evidence IDs must be unique": "RELEVANCE_REVIEW_INVALID",
+    "relevance evidence must belong to its query": "RELEVANCE_EVIDENCE_UNBOUND",
+    "relevance evidence requires a SUCCESS receipt": "RELEVANCE_EVIDENCE_UNAVAILABLE",
+    "RELEVANT review requires evidence": "RELEVANCE_REVIEW_INVALID",
+    "non-RELEVANT review cannot bind evidence": "RELEVANCE_REVIEW_INVALID",
+    "EMPTY review requires EMPTY receipts": "RELEVANCE_RECEIPT_MISMATCH",
+    "UNAVAILABLE review requires an unavailable receipt": "RELEVANCE_RECEIPT_MISMATCH",
+    "IRRELEVANT review requires a SUCCESS receipt": "RELEVANCE_RECEIPT_MISMATCH",
+    "IRRELEVANT review requires query evidence": "RELEVANCE_EVIDENCE_UNAVAILABLE",
+    "nearest prior must be supported by a RELEVANT review": "PRIOR_RELEVANCE_REQUIRED",
+    "RETRIEVAL_QUALITY_INCOMPLETE": "RETRIEVAL_QUALITY_INCOMPLETE",
+    "report payload contains a secret-shaped value": "REPORT_SECRET_DETECTED",
 }
+
+
+def _validate_relevance_reviews(item: _ReportInput, job: Mapping[str, Any], receipts: Sequence[dict[str, Any]]) -> None:
+    """Validate structure/provenance of operator/model relevance judgments."""
+    expected = tuple(job.get("searched_query_ids", ()))
+    reviews = item.relevance_reviews
+    if len(reviews) != len(expected) or {row.query_id for row in reviews} != set(expected):
+        raise ValueError("relevance reviews must exactly cover each query once")
+    by_query: dict[str, list[dict[str, Any]]] = {}
+    for receipt in receipts:
+        by_query.setdefault(str(receipt.get("query_id")), []).append(receipt)
+    evidence_by_id = {str(row["evidence_id"]): row for row in job.get("evidence", ())}
+    relevant_lanes: set[str] = set()
+    relevant_ids: set[str] = set()
+    # report jobs retain the compact query mapping in lane_query_ids; this is
+    # sufficient to bind evidence without embedding raw provider payloads.
+    for review in reviews:
+        query_receipts = by_query.get(review.query_id, [])
+        statuses = {str(row.get("status")) for row in query_receipts}
+        ids = list(review.relevant_evidence_ids)
+        if len(ids) != len(set(ids)):
+            raise ValueError("relevance evidence IDs must be unique")
+        for evidence_id in ids:
+            evidence = evidence_by_id.get(evidence_id)
+            if evidence is None or review.query_id not in evidence.get("query_ids", []):
+                raise ValueError("relevance evidence must belong to its query")
+            if not any(row.get("query_id") == review.query_id and row.get("status") == "SUCCESS" for row in query_receipts):
+                raise ValueError("relevance evidence requires a SUCCESS receipt")
+        if review.status == "RELEVANT":
+            if not ids:
+                raise ValueError("RELEVANT review requires evidence")
+            relevant_lanes.update(lane for lane, qids in job.get("lane_query_ids", {}).items() if review.query_id in qids)
+            for evidence_id in ids:
+                relevant_ids.add(evidence_id)
+                evidence = evidence_by_id.get(evidence_id)
+                if evidence:
+                    relevant_ids.update(str(alias) for alias in evidence.get("source_aliases", ()))
+                    if evidence.get("url"):
+                        relevant_ids.add(str(evidence["url"]))
+        elif ids:
+            raise ValueError("non-RELEVANT review cannot bind evidence")
+        elif review.status == "EMPTY" and statuses != {"EMPTY"}:
+            raise ValueError("EMPTY review requires EMPTY receipts")
+        elif review.status == "UNAVAILABLE" and ("SUCCESS" in statuses or not (statuses & {"ERROR", "CREDENTIALS_PROTOCOL_REQUIRED"})):
+            raise ValueError("UNAVAILABLE review requires an unavailable receipt")
+        elif review.status == "IRRELEVANT":
+            if "SUCCESS" not in statuses:
+                raise ValueError("IRRELEVANT review requires a SUCCESS receipt")
+            if not any(review.query_id in evidence.get("query_ids", []) for evidence in evidence_by_id.values()):
+                raise ValueError("IRRELEVANT review requires query evidence")
+    missing = set(_LANES) - relevant_lanes
+    if missing and item.decision in {ReconDecision.NO_DIRECT_COVERAGE_FOUND, ReconDecision.NEAR_PRIOR_WITH_RESIDUAL}:
+        raise ValueError("RETRIEVAL_QUALITY_INCOMPLETE")
+    if any(prior.evidence_url_or_id not in relevant_ids for prior in item.nearest_priors):
+        raise ValueError("nearest prior must be supported by a RELEVANT review")
 
 
 def _bounded_report_rejection(exc: ValidationError | ValueError) -> tuple[str, str]:
@@ -1415,11 +1507,17 @@ def _report_projection(jobs: Sequence[dict[str, Any]], raw_by_job: Mapping[str, 
     for job in jobs:
         raw = raw_by_job[job["job_id"]]; raw_sha = hashlib.sha256(raw.encode()).hexdigest()
         try:
-            item = _ReportInput.model_validate_json(_canonical_json(_strict_load(raw)), strict=True)
+            payload = _strict_load(raw)
+            if contains_secret(payload):
+                raise ValueError("report payload contains a secret-shaped value")
+            item = _ReportInput.model_validate_json(_canonical_json(payload), strict=True)
             for key in ("job_id", "opportunity_id", "query_pack_sha256", "normalized_evidence_manifest_sha256", "protocol_hash", "cache_key", "searched_query_ids"):
                 if getattr(item, key) != job[key]: raise ValueError("stale recon report binding")
+            if item.result_schema_sha256 != job.get("result_schema_sha256"):
+                raise ValueError("stale recon report binding")
             lane_status = job.get("lane_query_ids", {})
             if set(lane_status) != set(_LANES) or any(not any(qid in successful_queries for qid in qids) for qids in lane_status.values()): raise ValueError("each recon lane requires a SUCCESS or EMPTY receipt")
+            _validate_relevance_reviews(item, job, receipts)
             if latest_search is not None and item.searched_at < latest_search:
                 raise ValueError("searched_at precedes execution completion")
             permitted = {row["evidence_id"]: row for row in job["evidence"]}

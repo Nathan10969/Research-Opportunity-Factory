@@ -21,14 +21,14 @@ from .safety import contains_global_priority_claim, contains_secret, normalize_f
 from .stage_io import encode_json, encode_jsonl, publish_transaction, stage_mutation_lock
 
 
-ROUTE_POLICY_VERSION = "idea_factory.route_policy.v1"
-ROUTE_PROMPT_VERSION = "idea_factory.route_generator_prompt.v1"
-ROUTE_JOB_SCHEMA_VERSION = "idea_factory.route_job.v1"
-ROUTE_RESULT_SCHEMA_VERSION = "idea_factory.route_generator_result.v1"
-ROUTE_PROPOSAL_SCHEMA_VERSION = "idea_factory.route_proposal.v1"
-ROUTE_RECORD_SCHEMA_VERSION = "idea_factory.route_result.v1"
-ROUTE_OUTCOME_SCHEMA_VERSION = "idea_factory.route_ingestion_outcome.v1"
-ROUTE_MANIFEST_SCHEMA_VERSION = "idea_factory.route_bundle_manifest.v1"
+ROUTE_POLICY_VERSION = "idea_factory.route_policy.v2"
+ROUTE_PROMPT_VERSION = "idea_factory.route_generator_prompt.v2"
+ROUTE_JOB_SCHEMA_VERSION = "idea_factory.route_job.v2"
+ROUTE_RESULT_SCHEMA_VERSION = "idea_factory.route_generator_result.v2"
+ROUTE_PROPOSAL_SCHEMA_VERSION = "idea_factory.route_proposal.v2"
+ROUTE_RECORD_SCHEMA_VERSION = "idea_factory.route_result.v2"
+ROUTE_OUTCOME_SCHEMA_VERSION = "idea_factory.route_ingestion_outcome.v2"
+ROUTE_MANIFEST_SCHEMA_VERSION = "idea_factory.route_bundle_manifest.v2"
 _OUTPUTS = ("results.jsonl", "outcomes.jsonl", "bundle_manifest.json")
 _ALLOWED_DECISIONS = {"NEAR_PRIOR_WITH_RESIDUAL", "NO_DIRECT_COVERAGE_FOUND"}
 _DEFAULT_PROMPT = Path(__file__).resolve().parents[2] / "prompts" / "route_generator.md"
@@ -264,13 +264,9 @@ def _route_job_projection(
             "allowed_resources": list(ALLOWED_RESOURCES),
             "resource_constraints": RESOURCE_CONSTRAINTS,
             "resource_budget_description": RESOURCE_BUDGET_DESCRIPTION,
-            "mechanism_vocabulary": {
-                "intervention_site": list(INTERVENTION_SITES),
-                "operation": list(OPERATIONS),
-                "target_state": list(TARGET_STATES),
-                "learning_signal": list(LEARNING_SIGNALS),
-                "state_representation": list(STATE_REPRESENTATIONS),
-            },
+            "mechanism_facets": [
+                "intervention_site", "operation", "target_state", "learning_signal", "state_representation"
+            ],
             "mechanism_grounding_claim": "STRUCTURED_AND_OPPORTUNITY_BOUND_ONLY",
             "recon_provenance": recon_provenance,
             "recon_ready_record_sha256": ready_sha,
@@ -278,9 +274,10 @@ def _route_job_projection(
             "live_ready": live_ready,
             **truth,
             "route_ids": route_ids,
-            "required_route_count": 3,
+            "min_route_count": 1,
+            "max_route_count": 3,
             "mechanism_fingerprint_axes": ["intervention_site", "operation", "target_state", "learning_signal", "state_representation"],
-            "pairwise_minimum_distinct_axes": 2,
+            "semantic_diversity": "REQUIRES_REVIEW",
             **prompt,
         }
         body["route_job_sha256"] = _hash(body)
@@ -335,12 +332,12 @@ def validate_route_jobs(
 
 
 class MechanismSpec(FrozenStrictModel):
-    schema_version: Literal["idea_factory.mechanism_spec.v1"]
-    intervention_site: Literal["OBSERVATION_BOUNDARY", "STATE_TRANSITION", "OUTPUT_REPAIR"]
-    operation: Literal["MASK", "GATE", "TRANSFORM"]
-    target_state: Literal["OBSERVED_STATE", "LATENT_STATE", "DEPENDENCY_STATE"]
-    learning_signal: Literal["COUNTERFACTUAL_DELTA", "HELD_OUT_REGRET", "RECOVERY_DELTA"]
-    state_representation: Literal["VERSIONED_STATE", "EVIDENCE_VECTOR", "DEPENDENCY_GRAPH"]
+    schema_version: Literal["idea_factory.mechanism_spec.v2"]
+    intervention_site: NonEmptyStr
+    operation: NonEmptyStr
+    target_state: NonEmptyStr
+    learning_signal: NonEmptyStr
+    state_representation: NonEmptyStr
 
 
 def render_mechanism_spec(spec: MechanismSpec | Mapping[str, Any]) -> str:
@@ -385,7 +382,7 @@ class _DecisiveTest(FrozenStrictModel):
 
 
 class _RouteProposal(FrozenStrictModel):
-    schema_version: Literal["idea_factory.route_proposal.v1"]
+    schema_version: Literal["idea_factory.route_proposal.v2"]
     route_id: NonEmptyStr
     route_index: int = Field(strict=True, ge=1, le=3)
     opportunity_id: NonEmptyStr
@@ -409,13 +406,13 @@ class _RouteProposal(FrozenStrictModel):
 
 
 class _RouteGeneratorResult(FrozenStrictModel):
-    schema_version: Literal["idea_factory.route_generator_result.v1"]
+    schema_version: Literal["idea_factory.route_generator_result.v2"]
     job_id: NonEmptyStr
     opportunity_id: NonEmptyStr
     route_job_sha256: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
     recon_ready_record_sha256: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
-    routes: list[_RouteProposal] = Field(min_length=3, max_length=3)
+    routes: list[_RouteProposal] = Field(min_length=1, max_length=3)
 
 
 def _contains(text: str, binding: str) -> bool:
@@ -426,8 +423,8 @@ def _validate_route_semantics(item: _RouteGeneratorResult, job: Mapping[str, Any
     for key in ("job_id", "opportunity_id", "route_job_sha256", "prompt_sha256", "recon_ready_record_sha256"):
         if getattr(item, key) != job[key]:
             raise ValueError("route result binding mismatch")
-    if len(item.routes) != 3:
-        raise ValueError("route result must contain exactly three routes")
+    if not 1 <= len(item.routes) <= 3:
+        raise ValueError("route result must contain between one and three routes")
     opportunity = job["opportunity"]
     residual = job["residual"]["summary"]
     fingerprints: list[tuple[str, ...]] = []
@@ -452,12 +449,6 @@ def _validate_route_semantics(item: _RouteGeneratorResult, job: Mapping[str, Any
             raise ValueError("near-prior route requires at least one exact prior")
         if route.old_assumption_changed != opportunity["assumption_x"]:
             raise ValueError("route changes the bound research question")
-        if route.new_mechanism != render_mechanism_spec(route.mechanism_spec):
-            raise ValueError("new mechanism is not the canonical MechanismSpec rendering")
-        vocabulary = job["mechanism_vocabulary"]
-        spec_data = route.mechanism_spec.model_dump(mode="json")
-        if any(spec_data[axis] not in vocabulary[axis] for axis in job["mechanism_fingerprint_axes"]):
-            raise ValueError("route mechanism uses an uncontrolled vocabulary value")
         if not _contains(route.source_of_gain, route.causal_gain_hypothesis):
             raise ValueError("route source-of-gain fingerprint is not bound to its causal gain hypothesis")
         required = (
@@ -489,18 +480,22 @@ def _validate_route_semantics(item: _RouteGeneratorResult, job: Mapping[str, Any
         if len(set(route.required_resources)) != len(route.required_resources) or not set(route.required_resources).issubset(set(job["allowed_resources"])):
             raise ValueError("route requests a resource outside the job allowlist")
         fingerprint = tuple(
-            str(getattr(route.mechanism_spec, axis))
+            normalize_free_text(str(getattr(route.mechanism_spec, axis)))
             for axis in job["mechanism_fingerprint_axes"]
         )
         fingerprints.append(fingerprint)
         causal_hypotheses.append(normalize_free_text(route.causal_gain_hypothesis))
         gain_fingerprints.append(_hash(normalize_free_text(route.source_of_gain)))
-        if contains_global_priority_claim(route_texts):
+        if contains_global_priority_claim(_strip_verified_frozen_quotes(route_texts, opportunity)):
             raise ValueError("route generator makes a forbidden global-priority claim")
-    for left_index, left in enumerate(fingerprints):
-        for right in fingerprints[left_index + 1 :]:
-            if sum(a != b for a, b in zip(left, right)) < int(job["pairwise_minimum_distinct_axes"]):
-                raise ValueError("route mechanism fingerprints are not substantively distinct")
+    # Fingerprints establish deterministic provenance only; they are not a
+    # novelty or semantic-diversity certificate.  Reject only clear normalized
+    # clones of the mechanism content itself.
+    if len(set(fingerprints)) != len(fingerprints):
+        raise ValueError("route mechanism fingerprints are normalized clones")
+    mechanism_descriptions = [normalize_free_text(route.new_mechanism) for route in item.routes]
+    if len(set(mechanism_descriptions)) != len(mechanism_descriptions):
+        raise ValueError("route mechanism descriptions are normalized clones and not distinct")
     if len(set(causal_hypotheses)) != len(causal_hypotheses):
         raise ValueError("route causal gain hypotheses are not substantively distinct")
     if len(set(gain_fingerprints)) != len(gain_fingerprints):
@@ -516,7 +511,7 @@ def _model_authored_route_text(payload: Mapping[str, Any]) -> dict[str, Any]:
     copied_route = {
         "schema_version", "route_id", "route_index", "opportunity_id", "opportunity_sha256",
         "frozen_opportunity", "scope_constraints", "resource_constraints", "nearest_prior_bindings",
-        "residual", "old_assumption_changed", "mechanism_spec", "required_resources",
+        "residual", "old_assumption_changed", "required_resources",
         "cheapest_decisive_test",
     }
     authored_routes: list[dict[str, Any]] = []
@@ -539,12 +534,43 @@ def _model_authored_route_text(payload: Mapping[str, Any]) -> dict[str, Any]:
     return projection
 
 
+def _strip_verified_frozen_quotes(value: Any, frozen: Mapping[str, Any]) -> Any:
+    """Remove only exact text copied from the verified opportunity binding.
+
+    This is deliberately applied after payload secret scanning and only with
+    the opportunity reconstructed from replayed job artifacts, never with a
+    payload-supplied frozen object.
+    """
+    quote_keys = {"assumption_x", "observation_y", "condition_z", "failure_f", "missing_capability_w", "alternative_explanation_a", "decisive_experiment", "scope_compatibility"}
+    quotes = sorted(
+        {str(v) for k, v in frozen.items() if k in quote_keys and isinstance(v, str) and len(v.strip()) >= 12},
+        key=len,
+        reverse=True,
+    )
+    def clean(text: str) -> str:
+        for quote in quotes:
+            # Replace only a complete frozen phrase; never remove a substring
+            # such as ``ever attempted`` from authored ``never attempted``.
+            pattern = rf"(?<!\w){re.escape(quote)}(?!\w)"
+            text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+        return text
+    if isinstance(value, str):
+        return clean(value)
+    if isinstance(value, list):
+        return [_strip_verified_frozen_quotes(v, frozen) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_strip_verified_frozen_quotes(v, frozen) for v in value)
+    if isinstance(value, dict):
+        return {k: _strip_verified_frozen_quotes(v, frozen) for k, v in value.items()}
+    return value
+
+
 def _project_route_result(job: Mapping[str, Any], raw: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_sha = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     payload = _strict_load(raw)
     if contains_secret(payload):
         raise ValueError("route payload contains a credential-shaped secret")
-    if contains_global_priority_claim(_model_authored_route_text(payload)):
+    if contains_global_priority_claim(_strip_verified_frozen_quotes(_model_authored_route_text(payload), job["opportunity"])):
         raise ValueError("route payload contains a forbidden global-priority claim")
     item = _RouteGeneratorResult.model_validate(payload, strict=True)
     _validate_route_semantics(item, job)
@@ -567,6 +593,7 @@ def _project_route_result(job: Mapping[str, Any], raw: str) -> tuple[list[dict[s
                 "authenticity": job["authenticity"],
                 "authenticity_boundary": job["authenticity_boundary"],
                 "operator_attested_execution_ready": job["operator_attested_execution_ready"],
+                "semantic_diversity": "REQUIRES_REVIEW",
                 "mechanism_fingerprint": mechanism_sha,
                 "mechanism_spec_sha256": mechanism_sha,
                 **data,
@@ -579,7 +606,7 @@ def _project_route_result(job: Mapping[str, Any], raw: str) -> tuple[list[dict[s
         "status": "ACCEPTED",
         "raw_result_json": raw,
         "raw_result_sha256": raw_sha,
-        "route_ids": list(job["route_ids"]),
+        "route_ids": [route.route_id for route in item.routes],
         "accepted_projection_sha256": _hash(records),
     }
     return records, outcome
@@ -591,10 +618,10 @@ def _rejection(job: Mapping[str, Any], raw_sha: str, exc: Exception) -> dict[str
         code, reason = "ROUTE_SECRET_DETECTED", "route result contains credential-shaped content"
     elif "global-priority" in text:
         code, reason = "ROUTE_GLOBAL_PRIORITY_CLAIM_FORBIDDEN", "route generator cannot make global-priority claims"
-    elif "distinct" in text or "fingerprint" in text:
+    elif "distinct" in text or "fingerprint" in text or "clone" in text:
         code, reason = "ROUTE_DISTINCTNESS_INVALID", "route mechanisms are not conservatively distinct"
-    elif "exactly three" in text:
-        code, reason = "ROUTE_COUNT_INVALID", "route result must contain exactly three routes"
+    elif "between one and three" in text:
+        code, reason = "ROUTE_COUNT_INVALID", "route result must contain between one and three routes"
     elif "binding" in text or "research question" in text or "alternative" in text:
         code, reason = "ROUTE_BINDING_INVALID", "route result changes or loses an exact opportunity binding"
     else:
@@ -747,7 +774,7 @@ def ingest_route_results(
 
 _REJECTION_PAIRS = {
     ("ROUTE_DISTINCTNESS_INVALID", "route mechanisms are not conservatively distinct"),
-    ("ROUTE_COUNT_INVALID", "route result must contain exactly three routes"),
+    ("ROUTE_COUNT_INVALID", "route result must contain between one and three routes"),
     ("ROUTE_BINDING_INVALID", "route result changes or loses an exact opportunity binding"),
     ("ROUTE_SCHEMA_INVALID", "route result schema is invalid"),
     ("ROUTE_GLOBAL_PRIORITY_CLAIM_FORBIDDEN", "route generator cannot make global-priority claims"),

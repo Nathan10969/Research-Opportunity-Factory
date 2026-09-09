@@ -729,6 +729,7 @@ def test_real_backend_recon_handoff_materializes_imports_and_reports(tmp_path: P
     from idea_factory.pipeline import RealBackend
     from idea_factory.recon import TERMS_ACKNOWLEDGEMENT, record_terms_notification, validate_recon_bundle
     from test_recon import (
+        _arxiv_paper,
         _build_dedup_run,
         _fake_skill_roots,
         _fake_uv,
@@ -767,7 +768,11 @@ def test_real_backend_recon_handoff_materializes_imports_and_reports(tmp_path: P
     omitted_error_job = next(job["job_id"] for job in jobs if job["source"] == "OPENALEX")
     base_time = datetime.fromisoformat("2026-08-03T10:00:00+08:00")
     for job in jobs:
-        raw = b"" if job["source"] == "ARXIV" else b'{"meta":{"count":0,"per_page":10},"results":[]}'
+        if job["source"] == "ARXIV":
+            paper = _arxiv_paper("http://arxiv.org/abs/2501.00001v1", "Bound nearest prior", "https://arxiv.org/pdf/2501.00001")
+            raw = json.dumps({"status": "success", "results_count": 1, "papers": [paper]}).encode()
+        else:
+            raw = b'{"meta":{"count":0,"per_page":10},"results":[]}'
         relative = Path(str(job["raw_output_path"]))
         target = external.joinpath(*relative.parts[1:])
         if job["job_id"] != omitted_error_job:
@@ -784,11 +789,11 @@ def test_real_backend_recon_handoff_materializes_imports_and_reports(tmp_path: P
             "started_at": request_time.isoformat(), "request_started_at": request_time.isoformat(),
             "completed_at": (request_time + timedelta(seconds=1)).isoformat(),
             "exit_code": 1 if job["job_id"] == omitted_error_job else 0,
-            "status": "ERROR" if job["job_id"] == omitted_error_job else "EMPTY",
+            "status": "ERROR" if job["job_id"] == omitted_error_job else ("SUCCESS" if job["source"] == "ARXIV" else "EMPTY"),
             "http_status": None if job["job_id"] == omitted_error_job else 200,
             "raw_file_sha256": None if job["job_id"] == omitted_error_job else hashlib.sha256(raw).hexdigest(),
             "execution_context_sha256": execution_context["execution_context_sha256"],
-            "tool_stdout_summary": "" if job["job_id"] == omitted_error_job else "empty result",
+            "tool_stdout_summary": "not executed" if job["job_id"] == omitted_error_job else ("one result" if job["source"] == "ARXIV" else "empty result"),
             "tool_stderr_summary": "not executed" if job["job_id"] == omitted_error_job else "",
             "error_reason": "optional source unavailable" if job["job_id"] == omitted_error_job else "",
         })
@@ -799,7 +804,7 @@ def test_real_backend_recon_handoff_materializes_imports_and_reports(tmp_path: P
     assert report_jobs
     report_results = tmp_path / "report-results.jsonl"
     report_results.write_text(
-        "".join(_report_result(job, "NO_DIRECT_COVERAGE_FOUND") + "\n" for job in report_jobs),
+        "".join(_report_result(job, "NO_DIRECT_COVERAGE_FOUND", evidence=job["evidence"][0], include_prior=False) + "\n" for job in report_jobs),
         encoding="utf-8",
     )
     assert backend.ingest_recon(run, config=config, results=report_results, execution_bundle=None) is True
@@ -1524,16 +1529,15 @@ def test_real_cli_offline_fixture_runs_complete_strict_pipeline_without_backend_
     receipts = []
     arxiv_index = 0; base_time = datetime.fromisoformat("2026-08-03T10:00:00+08:00")
     execution_context = json.loads((run / "recon" / "execution_context.json").read_text(encoding="utf-8"))
-    evidence_job_id = next(job["job_id"] for job in execution_jobs if job["source"] == "ARXIV")
     for job in execution_jobs:
-        if job["job_id"] == evidence_job_id:
+        if job["source"] == "ARXIV":
             paper = _arxiv_paper(
                 "http://arxiv.org/abs/2501.00001v1", "Bound nearest prior",
                 "https://arxiv.org/pdf/2501.00001",
             )
             raw = json.dumps({"status": "success", "results_count": 1, "papers": [paper]}).encode()
         else:
-            raw = b"" if job["source"] == "ARXIV" else b'{"meta":{"count":0,"per_page":10},"results":[]}'
+            raw = b'{"meta":{"count":0,"per_page":10},"results":[]}'
         relative = Path(str(job["raw_output_path"])); target = execution.joinpath(*relative.parts[1:])
         target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
         request_time = base_time
@@ -1546,10 +1550,10 @@ def test_real_cli_offline_fixture_runs_complete_strict_pipeline_without_backend_
             "query_pack_sha256": job["query_pack_sha256"], "command_policy_version": job["command_policy_version"],
             "started_at": request_time.isoformat(), "request_started_at": request_time.isoformat(),
             "completed_at": (request_time + timedelta(seconds=1)).isoformat(), "exit_code": 0,
-            "status": "SUCCESS" if job["job_id"] == evidence_job_id else "EMPTY",
+            "status": "SUCCESS" if job["source"] == "ARXIV" else "EMPTY",
             "http_status": 200, "raw_file_sha256": hashlib.sha256(raw).hexdigest(),
             "execution_context_sha256": execution_context["execution_context_sha256"],
-            "tool_stdout_summary": "one result" if job["job_id"] == evidence_job_id else "empty result",
+            "tool_stdout_summary": "one result" if job["source"] == "ARXIV" else "empty result",
             "tool_stderr_summary": "", "error_reason": "",
         })
     _jsonl(execution / "execution_receipts.jsonl", receipts)
@@ -1560,10 +1564,7 @@ def test_real_cli_offline_fixture_runs_complete_strict_pipeline_without_backend_
     report_jobs = read_jsonl(run / "recon" / "report_jobs.jsonl")
     recon_results = tmp_path / "recon-results.jsonl"
     recon_results.write_text(
-        "".join(
-            _report_result(job, "NEAR_PRIOR_WITH_RESIDUAL", evidence=job["evidence"][0]) + "\n"
-            for job in report_jobs
-        ),
+        "".join(_report_result(job, "NEAR_PRIOR_WITH_RESIDUAL", evidence=job["evidence"][0]) + "\n" for job in report_jobs),
         encoding="utf-8",
     )
     assert _invoke(

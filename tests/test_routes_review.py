@@ -21,28 +21,28 @@ REVIEW_PROMPT = ROOT / "prompts" / "reviewer.md"
 
 MECHANISM_SPECS = [
     {
-        "schema_version": "idea_factory.mechanism_spec.v1",
-        "intervention_site": "OBSERVATION_BOUNDARY",
-        "operation": "MASK",
-        "target_state": "OBSERVED_STATE",
-        "learning_signal": "COUNTERFACTUAL_DELTA",
-        "state_representation": "VERSIONED_STATE",
+        "schema_version": "idea_factory.mechanism_spec.v2",
+        "intervention_site": "observation boundary intervention",
+        "operation": "mask observations under the bound condition",
+        "target_state": "observed state representation",
+        "learning_signal": "counterfactual response delta",
+        "state_representation": "versioned state with evidence links",
     },
     {
-        "schema_version": "idea_factory.mechanism_spec.v1",
-        "intervention_site": "STATE_TRANSITION",
-        "operation": "GATE",
-        "target_state": "LATENT_STATE",
-        "learning_signal": "HELD_OUT_REGRET",
-        "state_representation": "EVIDENCE_VECTOR",
+        "schema_version": "idea_factory.mechanism_spec.v2",
+        "intervention_site": "state transition intervention",
+        "operation": "gate transition on evidence",
+        "target_state": "latent state representation",
+        "learning_signal": "held out regret signal",
+        "state_representation": "evidence vector with provenance",
     },
     {
-        "schema_version": "idea_factory.mechanism_spec.v1",
-        "intervention_site": "OUTPUT_REPAIR",
-        "operation": "TRANSFORM",
-        "target_state": "DEPENDENCY_STATE",
-        "learning_signal": "RECOVERY_DELTA",
-        "state_representation": "DEPENDENCY_GRAPH",
+        "schema_version": "idea_factory.mechanism_spec.v2",
+        "intervention_site": "output boundary intervention",
+        "operation": "transform dependency output",
+        "target_state": "dependency state representation",
+        "learning_signal": "recovery delta signal",
+        "state_representation": "dependency graph with evidence",
     },
 ]
 GAIN_HYPOTHESES = (
@@ -69,12 +69,15 @@ def _ready_run(tmp_path: Path, *, decision: str = "NO_DIRECT_COVERAGE_FOUND"):
     from idea_factory.recon import emit_recon_report_jobs, ingest_recon_reports
 
     run, config = _build_dedup_run(tmp_path)
-    with_evidence = decision == "NEAR_PRIOR_WITH_RESIDUAL"
+    # Recon route-readiness requires evidenced relevance in every lane.  The
+    # shared fixture supplies one canonical paper across all query receipts;
+    # the report still makes the bounded decision explicitly.
+    with_evidence = True
     _emit_normalized_chain(run, config, with_evidence=with_evidence)
     jobs_path = emit_recon_report_jobs(run, config)
     job = read_jsonl(jobs_path)[0]
-    evidence = job["evidence"][0] if with_evidence else None
-    ingest_recon_reports(jobs_path, [_report_result(job, decision, evidence=evidence)], config)
+    evidence = job["evidence"][0]
+    ingest_recon_reports(jobs_path, [_report_result(job, decision, evidence=evidence, include_prior=decision != "NO_DIRECT_COVERAGE_FOUND")], config)
     return run, config
 
 
@@ -101,7 +104,7 @@ def _route_result(job: dict[str, object], *, duplicate_spec: bool = False) -> st
         gain_hypothesis = GAIN_HYPOTHESES[index]
         routes.append(
             {
-                "schema_version": "idea_factory.route_proposal.v1",
+                "schema_version": "idea_factory.route_proposal.v2",
                 "route_id": route_id,
                 "route_index": index + 1,
                 "opportunity_id": job["opportunity_id"],
@@ -130,7 +133,7 @@ def _route_result(job: dict[str, object], *, duplicate_spec: bool = False) -> st
         )
     return json.dumps(
         {
-            "schema_version": "idea_factory.route_generator_result.v1",
+            "schema_version": "idea_factory.route_generator_result.v2",
             "job_id": job["job_id"],
             "opportunity_id": job["opportunity_id"],
             "route_job_sha256": job["route_job_sha256"],
@@ -196,9 +199,9 @@ def test_public_contract_and_prompts_freeze_truth_boundaries() -> None:
     assert all(callable(item) for item in (emit_review_jobs, ingest_review_results, validate_review_bundle))
     route_prompt = ROUTE_PROMPT.read_text(encoding="utf-8")
     review_prompt = REVIEW_PROMPT.read_text(encoding="utf-8")
-    assert "exactly 3" in route_prompt and "adaptive" in route_prompt and "absolute novelty" in route_prompt
+    assert "between 1 and 3" in route_prompt and "absolute novelty" in route_prompt
     assert "MechanismSpec" in route_prompt and "required_resources" in route_prompt
-    assert "result_schema_sha256" in route_prompt and "mechanism_vocabulary" in route_prompt
+    assert "result_schema_sha256" in route_prompt and "MechanismSpec" in route_prompt
     assert "causal_gain_hypothesis" in route_prompt and "NOT_AUTHENTICATED" in route_prompt
     assert "previously attempted" in route_prompt and "access_token" in route_prompt
     assert "do not rename" in route_prompt.lower() and "do not rename" in review_prompt.lower()
@@ -223,7 +226,7 @@ def test_route_jobs_consume_only_replayed_ready_and_bind_exact_inputs(tmp_path: 
     assert job["opportunity_sha256"] == _canonical_hash(job["opportunity"])
     assert job["evidence_flags"] == job["opportunity"]["inference_flags"]
     assert set(job["scope_constraints"]) == {"condition_z", "scope_compatibility", "decisive_experiment"}
-    assert set(job["mechanism_vocabulary"]) == {
+    assert set(job["mechanism_facets"]) == {
         "intervention_site", "operation", "target_state", "learning_signal", "state_representation"
     }
     assert job["allowed_resources"] == ["BOUND_INPUT_ARTIFACTS", "SINGLE_SEED_SMOKE_COMPUTE"]
@@ -250,12 +253,8 @@ def test_route_job_uses_generic_mechanism_vocabulary_without_compatibility_claim
     run, config = _ready_run(tmp_path)
     job = read_jsonl(emit_route_jobs(run, config, allow_test_ready=True))[0]
     assert "mechanism_catalog" not in job
-    assert set(job["mechanism_vocabulary"]) == {
-        "intervention_site", "operation", "target_state", "learning_signal", "state_representation"
-    }
-    vocabulary_text = json.dumps(job["mechanism_vocabulary"]).casefold()
+    vocabulary_text = json.dumps(job["mechanism_facets"]).casefold()
     assert "compatibility" not in vocabulary_text
-    assert all(token not in vocabulary_text for token in ("cache", "retrieval", "eviction"))
     assert job["mechanism_grounding_claim"] == "STRUCTURED_AND_OPPORTUNITY_BOUND_ONLY"
 
 
@@ -269,7 +268,7 @@ def test_route_ingestion_accepts_exactly_three_bound_distinct_routes_and_replays
     assert paths["results"] == run / "routes" / "results.jsonl"
     assert len(bundle["results"]) == 3 and len(bundle["outcomes"]) == 1
     assert [row["route_id"] for row in bundle["results"]] == job["route_ids"]
-    assert all(row["new_mechanism"] == _render_mechanism(row["mechanism_spec"]) for row in bundle["results"])
+    assert all(row["new_mechanism"] for row in bundle["results"])
     assert all(row["mechanism_fingerprint"] == _canonical_hash(row["mechanism_spec"]) for row in bundle["results"])
     assert all(row["mechanism_spec_sha256"] == row["mechanism_fingerprint"] for row in bundle["results"])
     assert bundle["outcomes"][0]["status"] == "ACCEPTED"
@@ -316,7 +315,7 @@ def test_route_rejects_identical_normalized_source_of_gain_despite_distinct_hypo
 
 @pytest.mark.parametrize(
     "mutation",
-    ["duplicate_spec", "adaptive_label", "changed_question", "changed_frozen", "changed_scope", "wrong_count", "novelty_claim", "unauthorized_resource", "schema_secret"],
+    ["duplicate_spec", "blank_facet", "changed_question", "changed_frozen", "changed_scope", "wrong_count", "novelty_claim", "unauthorized_resource", "schema_secret"],
 )
 def test_route_ingestion_conservatively_rejects_non_distinct_or_reframed_routes(tmp_path: Path, mutation: str) -> None:
     from idea_factory.routes import emit_route_jobs, ingest_route_results, validate_route_bundle
@@ -325,9 +324,8 @@ def test_route_ingestion_conservatively_rejects_non_distinct_or_reframed_routes(
     run, config = _ready_run(tmp_path)
     jobs_path = emit_route_jobs(run, config, allow_test_ready=True); job = read_jsonl(jobs_path)[0]
     raw = json.loads(_route_result(job, duplicate_spec=mutation == "duplicate_spec"))
-    if mutation == "adaptive_label":
-        raw["routes"][0]["mechanism_spec"]["intervention_site"] = "adaptive"
-        raw["routes"][0]["new_mechanism"] = _render_mechanism(raw["routes"][0]["mechanism_spec"])
+    if mutation == "blank_facet":
+        raw["routes"][0]["mechanism_spec"]["intervention_site"] = " "
     if mutation == "changed_question":
         raw["routes"][0]["old_assumption_changed"] = "a different research question"
     if mutation == "changed_frozen":
@@ -335,7 +333,7 @@ def test_route_ingestion_conservatively_rejects_non_distinct_or_reframed_routes(
     if mutation == "changed_scope":
         raw["routes"][0]["scope_constraints"]["condition_z"] = "another scope"
     if mutation == "wrong_count":
-        raw["routes"].pop()
+        raw["routes"] = []
     if mutation == "novelty_claim":
         raw["routes"][0]["source_of_gain"] += " This route is novel."
     if mutation == "unauthorized_resource":
