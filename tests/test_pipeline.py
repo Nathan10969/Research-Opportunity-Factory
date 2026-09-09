@@ -393,7 +393,7 @@ def test_real_backend_routes_labels_cards_and_landscape_offline(tmp_path: Path) 
     router_job = read_jsonl(run / "corpus" / "router_jobs.jsonl")[0]
     labels = tmp_path / "labels.jsonl"
     _jsonl(labels, [{
-        "schema_version": "idea_factory.corpus_router_result.v1",
+        "schema_version": "idea_factory.corpus_router_result.v2",
         **{key: router_job[key] for key in ("job_id", "slug", "note_sha256", "prompt_sha256")},
         "label": "KV_CACHE", "core_mechanism": "bounded eviction",
         "scope_reason": "KV serving", "evidence_locator": "note:1", "confidence": "HIGH",
@@ -1445,7 +1445,7 @@ def test_real_cli_offline_fixture_runs_complete_strict_pipeline_without_backend_
     router_jobs = read_jsonl(run / "corpus" / "router_jobs.jsonl")
     labels = tmp_path / "labels.jsonl"
     _jsonl(labels, [{
-        "schema_version": "idea_factory.corpus_router_result.v1",
+        "schema_version": "idea_factory.corpus_router_result.v2",
         **{key: job[key] for key in ("job_id", "slug", "note_sha256", "prompt_sha256")},
         "label": "KV_CACHE" if index == 0 else "LONG_MEMORY",
         "core_mechanism": "bounded memory eviction", "scope_reason": "KV-memory serving",

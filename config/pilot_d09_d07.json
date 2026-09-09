@@ -1,0 +1,9 @@
+{
+  "notes_root": "../notes",
+  "candidate_lists": ["../papers/_domain_rounds/D09_annotation_human/note_paths.txt", "../papers/_domain_rounds/D07_robustness_ood/note_paths.txt"],
+  "legacy_ledger": "../papers/_ideas/idea_ledger.md",
+  "target_min": 30,
+  "target_max": 40,
+  "allowed_labels": ["HUMAN_SUPERVISION", "SHIFT_ROBUSTNESS", "SUPERVISION_SHIFT_BRIDGE"],
+  "bridge_regression_slugs": []
+}

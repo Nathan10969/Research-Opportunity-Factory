@@ -192,6 +192,16 @@ directories, credentials, and locally generated Idea Packs.
 5. Evaluate whether the added lane increases new-object discovery rather than
    merely producing mathematically decorated recombinations.
 
+### Bounded D09 x D07 pilot
+
+The portable `config/pilot_d09_d07.json` enumerates the full D09 human-supervision
+and D07 distribution-shift source lists. It describes a bounded 30--40 target
+for the default pilot, but a separately reviewed local selection config may use
+a smaller target; the pipeline must not manufacture records to reach 30. Run it with the existing CLI `--prompt`
+`prompts/corpus_router_d09_d07.md`; the prompt and source paths are hashed into
+run-local jobs. This is a fresh v2 artifact boundary: v1 router jobs/results
+must not be reused or upgraded in place.
+
 ## License
 
 Apache-2.0. See `LICENSE`.

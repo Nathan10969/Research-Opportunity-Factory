@@ -29,9 +29,9 @@ REPO_ROOT = Path(__file__).parents[1]
 FIXTURES = Path(__file__).parent / "fixtures"
 PROMPT = REPO_ROOT / "prompts" / "corpus_router.md"
 PROMPT_SHA256 = hashlib.sha256(PROMPT.read_bytes()).hexdigest()
-PROMPT_VERSION = "idea_factory.corpus_router_prompt.v1"
-ROUTER_JOB_SCHEMA_VERSION = "idea_factory.corpus_router_job.v1"
-ROUTER_RESULT_SCHEMA_VERSION = "idea_factory.corpus_router_result.v1"
+PROMPT_VERSION = "idea_factory.corpus_router_prompt.v2"
+ROUTER_JOB_SCHEMA_VERSION = "idea_factory.corpus_router_job.v2"
+ROUTER_RESULT_SCHEMA_VERSION = "idea_factory.corpus_router_result.v2"
 
 
 def directory_link_or_skip(link: Path, target: Path) -> None:
@@ -539,7 +539,7 @@ def test_router_job_rerun_invalidates_downstream_manifests_even_on_failure(
 def test_router_prompt_requires_exact_bound_json_result() -> None:
     prompt = PROMPT.read_text(encoding="utf-8")
 
-    assert '"schema_version":"idea_factory.corpus_router_result.v1"' in prompt
+    assert '"schema_version":"idea_factory.corpus_router_result.v2"' in prompt
     assert '"job_id":"string"' in prompt
     assert '"note_sha256":"string"' in prompt
     assert '"prompt_sha256":"string"' in prompt

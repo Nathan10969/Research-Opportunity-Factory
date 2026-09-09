@@ -16,9 +16,9 @@ from .models import CorpusLabel, FrozenStrictModel, NonEmptyStr, Sha256Hex
 
 
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
-PROMPT_VERSION = "idea_factory.corpus_router_prompt.v1"
-ROUTER_JOB_SCHEMA_VERSION = "idea_factory.corpus_router_job.v1"
-ROUTER_RESULT_SCHEMA_VERSION = "idea_factory.corpus_router_result.v1"
+PROMPT_VERSION = "idea_factory.corpus_router_prompt.v2"
+ROUTER_JOB_SCHEMA_VERSION = "idea_factory.corpus_router_job.v2"
+ROUTER_RESULT_SCHEMA_VERSION = "idea_factory.corpus_router_result.v2"
 SELECTION_POLICY_SCHEMA_VERSION = "idea_factory.selection_policy.v1"
 STRATIFICATION_VERSION = "round_robin_allowed_label_then_slug.v1"
 ACCEPTED_CONFIDENCES = ("HIGH", "MEDIUM")
@@ -36,7 +36,7 @@ REQUIRED_OUTPUT_SCHEMA: dict[str, object] = {
         "slug": {"type": "string", "minLength": 1},
         "note_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "label": {"enum": ["KV_CACHE", "LONG_MEMORY", "BRIDGE", "OTHER"]},
+        "label": {"enum": [label.value for label in CorpusLabel]},
         "core_mechanism": {"type": "string", "minLength": 1},
         "scope_reason": {"type": "string", "minLength": 1},
         "evidence_locator": {"type": "string", "minLength": 1},
@@ -71,9 +71,7 @@ class CorpusRouterConfig:
             raise ValueError("allowed_labels must be a list or tuple")
         allowed = tuple(self.allowed_labels)
         eligible_labels = {
-            CorpusLabel.KV_CACHE.value,
-            CorpusLabel.LONG_MEMORY.value,
-            CorpusLabel.BRIDGE.value,
+            label.value for label in CorpusLabel if label is not CorpusLabel.OTHER
         }
         if (
             not allowed
@@ -186,7 +184,7 @@ class CorpusCandidate:
 
 
 class RouterResult(FrozenStrictModel):
-    schema_version: Literal["idea_factory.corpus_router_result.v1"]
+    schema_version: Literal["idea_factory.corpus_router_result.v2"]
     job_id: NonEmptyStr
     slug: NonEmptyStr
     note_sha256: Sha256Hex
