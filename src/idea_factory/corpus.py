@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
@@ -19,6 +20,20 @@ Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 PROMPT_VERSION = "idea_factory.corpus_router_prompt.v2"
 ROUTER_JOB_SCHEMA_VERSION = "idea_factory.corpus_router_job.v2"
 ROUTER_RESULT_SCHEMA_VERSION = "idea_factory.corpus_router_result.v2"
+V3_PROMPT_VERSION = "idea_factory.corpus_router_prompt.v3"
+V3_ROUTER_JOB_SCHEMA_VERSION = "idea_factory.corpus_router_job.v3"
+V3_ROUTER_RESULT_SCHEMA_VERSION = "idea_factory.corpus_router_result.v3"
+V2_LABELS = [
+    "KV_CACHE", "LONG_MEMORY", "BRIDGE", "HUMAN_SUPERVISION",
+    "SHIFT_ROBUSTNESS", "SUPERVISION_SHIFT_BRIDGE", "OTHER",
+]
+ROUTER_JOB_FIELDS = {
+    "record_id", "slug", "note_path", "source_lists", "source_list_bindings",
+    "candidate_list_manifest", "allowed_note_root", "allowed_papers_root",
+    "legacy_ledger_path", "note_sha256", "schema_version", "job_id",
+    "note_text", "prompt_id", "prompt_version", "prompt_path", "prompt_sha256",
+    "prompt_text", "result_schema_version", "required_output_schema",
+}
 SELECTION_POLICY_SCHEMA_VERSION = "idea_factory.selection_policy.v1"
 STRATIFICATION_VERSION = "round_robin_allowed_label_then_slug.v1"
 ACCEPTED_CONFIDENCES = ("HIGH", "MEDIUM")
@@ -36,11 +51,19 @@ REQUIRED_OUTPUT_SCHEMA: dict[str, object] = {
         "slug": {"type": "string", "minLength": 1},
         "note_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "label": {"enum": [label.value for label in CorpusLabel]},
+        "label": {"enum": V2_LABELS},
         "core_mechanism": {"type": "string", "minLength": 1},
         "scope_reason": {"type": "string", "minLength": 1},
         "evidence_locator": {"type": "string", "minLength": 1},
         "confidence": {"enum": ["HIGH", "MEDIUM", "LOW"]},
+    },
+}
+V3_REQUIRED_OUTPUT_SCHEMA: dict[str, object] = {
+    **REQUIRED_OUTPUT_SCHEMA,
+    "properties": {
+        **REQUIRED_OUTPUT_SCHEMA["properties"],
+        "schema_version": {"const": V3_ROUTER_RESULT_SCHEMA_VERSION},
+        "label": {"enum": ["GENERAL_RESEARCH", "OTHER"]},
     },
 }
 
@@ -56,6 +79,8 @@ class CorpusRouterConfig:
     target_max: int
     allowed_labels: tuple[str, ...]
     bridge_regression_slugs: tuple[str, ...]
+    protocol_version: str = "v2"
+    source_primary_manifest: Path | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -70,9 +95,15 @@ class CorpusRouterConfig:
         if not isinstance(self.allowed_labels, (list, tuple)):
             raise ValueError("allowed_labels must be a list or tuple")
         allowed = tuple(self.allowed_labels)
-        eligible_labels = {
-            label.value for label in CorpusLabel if label is not CorpusLabel.OTHER
-        }
+        if self.protocol_version not in {"v2", "v3"}:
+            raise ValueError("protocol_version must be v2 or v3")
+        if self.protocol_version == "v3" and self.source_primary_manifest is None:
+            raise ValueError("v3 requires an explicit primary source manifest")
+        if self.protocol_version == "v2" and self.source_primary_manifest is not None:
+            raise ValueError("primary source manifest is v3-only")
+        eligible_labels = (
+            {"GENERAL_RESEARCH"} if self.protocol_version == "v3" else set(V2_LABELS) - {"OTHER"}
+        )
         if (
             not allowed
             or any(type(label) is not str or label not in eligible_labels for label in allowed)
@@ -105,6 +136,17 @@ class CorpusRouterConfig:
         object.__setattr__(self, "legacy_ledger", Path(self.legacy_ledger).resolve())
         object.__setattr__(self, "allowed_labels", allowed)
         object.__setattr__(self, "bridge_regression_slugs", tuple(normalized_bridges))
+        if self.source_primary_manifest is not None:
+            raw_manifest = Path(self.source_primary_manifest)
+            if raw_manifest.is_symlink():
+                raise ValueError("primary source manifest must not be a symlink")
+            try:
+                resolved_manifest = raw_manifest.resolve(strict=True)
+            except OSError as exc:
+                raise ValueError("primary source manifest is missing") from exc
+            if not resolved_manifest.is_file():
+                raise ValueError("primary source manifest must be a regular file")
+            object.__setattr__(self, "source_primary_manifest", resolved_manifest)
 
     @classmethod
     def from_json(cls, path: Path, *, repo_root: Path | None = None) -> "CorpusRouterConfig":
@@ -121,8 +163,15 @@ class CorpusRouterConfig:
             "notes_root", "candidate_lists", "legacy_ledger", "target_min", "target_max",
             "allowed_labels", "bridge_regression_slugs",
         }
-        if set(payload) != expected:
+        accepted_keys = {
+            frozenset(expected),
+            frozenset(expected | {"protocol_version"}),
+            frozenset(expected | {"protocol_version", "source_primary_manifest"}),
+        }
+        if frozenset(payload) not in accepted_keys:
             raise ValueError("corpus router config has missing or unexpected fields")
+        if payload.get("protocol_version", "v2") == "v3" and "source_primary_manifest" not in payload:
+            raise ValueError("v3 config must explicitly bind source_primary_manifest")
 
         lists = payload["candidate_lists"]
         if not isinstance(lists, list) or not lists:
@@ -134,6 +183,8 @@ class CorpusRouterConfig:
         if not isinstance(bridge_slugs, list):
             raise ValueError("bridge_regression_slugs must be an array")
         path_values = [payload["notes_root"], payload["legacy_ledger"], *lists]
+        if "source_primary_manifest" in payload:
+            path_values.append(payload["source_primary_manifest"])
         if any(not isinstance(value, str) or not value.strip() for value in path_values):
             raise ValueError("corpus router config paths must be nonblank strings")
 
@@ -167,6 +218,8 @@ class CorpusRouterConfig:
             target_max=payload["target_max"],
             allowed_labels=tuple(allowed_labels),
             bridge_regression_slugs=tuple(bridge_slugs),
+            protocol_version=payload.get("protocol_version", "v2"),
+            source_primary_manifest=resolve_from(root, payload["source_primary_manifest"]) if payload.get("source_primary_manifest") else None,
         )
 
 
@@ -181,10 +234,21 @@ class CorpusCandidate:
     allowed_note_root: str = ""
     allowed_papers_root: str = ""
     legacy_ledger_path: str = ""
+    protocol_version: str = "v2"
+    source_primary_manifest_binding: tuple[str, str] | None = None
+    source_pdf_path: str | None = None
+    source_pdf_sha256: str | None = None
+    source_record_aliases: tuple[str, ...] = ()
+    source_status: str = "NOT_ADJUDICATED"
+    source_version: str | None = None
+    source_adjudication_binding: tuple[str, str] | None = None
+    primary_source_record: dict[str, object] | None = None
 
 
 class RouterResult(FrozenStrictModel):
-    schema_version: Literal["idea_factory.corpus_router_result.v2"]
+    schema_version: Literal[
+        "idea_factory.corpus_router_result.v2", "idea_factory.corpus_router_result.v3"
+    ]
     job_id: NonEmptyStr
     slug: NonEmptyStr
     note_sha256: Sha256Hex
@@ -236,6 +300,130 @@ def _read_candidate_paths(source_list: Path) -> Iterable[Path]:
         yield item.resolve() if item.is_absolute() else (source_list.parent / item).resolve()
 
 
+_ADJUDICATION_FIELDS = {
+    "schema_version", "reviewed_at_utc", "review_scope", "human_approved", "event_id",
+    "canonical_arxiv_id", "source_version", "source_url", "source_status",
+    "scientific_admission", "evidence_summary", "original_download_status",
+    "original_download_error", "retry_decision", "silent_version_fallback_allowed",
+    "original_artifacts_changed", "graph_ingested", "downstream_requirement",
+}
+
+
+def _load_primary_source_manifest(path: Path) -> tuple[str, str, dict[str, dict[str, object]]]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("primary source manifest is missing or unsafe")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("primary source manifest is not valid UTF-8 JSON") from exc
+    if not isinstance(data, dict) or set(data) != {"schema_version", "records"} or data.get("schema_version") != "idea_factory.primary_source_manifest.v1" or not isinstance(data["records"], list):
+        raise ValueError("primary source manifest has unexpected or missing fields")
+    required = {
+        "slug", "canonical_note_path", "note_sha256", "primary_pdf_path", "primary_pdf_sha256",
+        "source_record_ids", "source_status", "source_version", "adjudication_path", "adjudication_sha256",
+    }
+    records: dict[str, dict[str, object]] = {}
+    allowed_statuses = {
+        "PRIMARY_SOURCE_VERIFIED", "SOURCE_WITHDRAWN", "SOURCE_REJECTED",
+        "SOURCE_UNAVAILABLE", "SOURCE_STATUS_PENDING",
+    }
+    for row in data["records"]:
+        if not isinstance(row, dict) or set(row) != required:
+            raise ValueError("primary source record has unexpected or missing fields")
+        slug = row["slug"]
+        note_path = row["canonical_note_path"]
+        note_sha = row["note_sha256"]
+        pdf_path, pdf_sha = row["primary_pdf_path"], row["primary_pdf_sha256"]
+        ids, status, version = row["source_record_ids"], row["source_status"], row["source_version"]
+        adj_path, adj_sha = row["adjudication_path"], row["adjudication_sha256"]
+        if (
+            type(slug) is not str or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug)
+            or type(note_path) is not str or str(Path(note_path).resolve()) != note_path
+            or type(note_sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", note_sha)
+            or not isinstance(ids, list) or not ids or any(type(item) is not str or not item.strip() for item in ids)
+            or len(set(ids)) != len(ids) or type(status) is not str or status not in allowed_statuses
+            or (version is not None and (type(version) is not str or not re.fullmatch(r"v[1-9][0-9]*", version)))
+        ):
+            raise ValueError("primary source record is malformed")
+        for source_id in ids:
+            versioned_arxiv = re.fullmatch(r"(?:arxiv|arxiv_existing):\d{4}\.\d{4,5}(v[1-9][0-9]*)", source_id.lower())
+            if versioned_arxiv and version != versioned_arxiv.group(1):
+                raise ValueError("primary source record version does not match its exact source alias")
+        if (pdf_path is None) != (pdf_sha is None):
+            raise ValueError("primary PDF path and hash must be bound together")
+        if pdf_path is not None:
+            if type(pdf_path) is not str or str(Path(pdf_path).resolve()) != pdf_path or type(pdf_sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", pdf_sha):
+                raise ValueError("primary PDF binding is malformed")
+        elif status == "PRIMARY_SOURCE_VERIFIED":
+            raise ValueError("verified primary source requires an actual primary PDF binding")
+        if (adj_path is None) != (adj_sha is None):
+            raise ValueError("adjudication path and hash must be bound together")
+        if status in {"SOURCE_WITHDRAWN", "SOURCE_REJECTED"} and adj_path is None:
+            raise ValueError("withdrawn or rejected source requires an explicit adjudication binding")
+        if adj_path is not None and (type(adj_path) is not str or str(Path(adj_path).resolve()) != adj_path or type(adj_sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", adj_sha)):
+            raise ValueError("adjudication binding is malformed")
+        if note_path in records:
+            raise ValueError("primary source manifest contains duplicate canonical notes")
+        if any(existing["slug"] == slug for existing in records.values()):
+            raise ValueError("primary source manifest contains duplicate stable slugs")
+        records[note_path] = row
+    source_identity_rows: dict[str, list[dict[str, object]]] = {}
+    for row in records.values():
+        for source_id in row["source_record_ids"]:
+            value = str(source_id).lower()
+            match = re.fullmatch(r"(?:arxiv|arxiv_existing):(\d{4}\.\d{4,5})(v[1-9][0-9]*)?", value)
+            identity = f"arxiv:{match.group(1)}" if match else value
+            source_identity_rows.setdefault(identity, []).append(row)
+    for rows in source_identity_rows.values():
+        pdf_hashes = {row["primary_pdf_sha256"] for row in rows if row["primary_pdf_sha256"] is not None}
+        if len(pdf_hashes) > 1 and any(row["source_status"] != "SOURCE_STATUS_PENDING" for row in rows):
+            raise ValueError("source identity aliases across distinct primary PDFs must remain SOURCE_STATUS_PENDING")
+    return str(path.resolve()), sha256_file(path), records
+
+
+def _validate_primary_source_row(row: dict[str, object], *, note_path: Path, note_sha256: str, papers_root: Path) -> None:
+    if row["canonical_note_path"] != str(note_path) or row["note_sha256"] != note_sha256:
+        raise ValueError("primary source manifest note hash/path binding mismatch")
+    pdf_path, pdf_sha = row["primary_pdf_path"], row["primary_pdf_sha256"]
+    if pdf_path is not None:
+        pdf = Path(str(pdf_path))
+        if pdf.is_symlink() or not pdf.is_file() or not _is_within(pdf.resolve(), papers_root):
+            raise ValueError("primary source manifest PDF path is unsafe or outside the allowed papers root")
+        if sha256_file(pdf) != pdf_sha:
+            raise ValueError("primary source manifest PDF hash mismatch")
+    if row["source_status"] == "PRIMARY_SOURCE_VERIFIED" and pdf_path is None:
+        raise ValueError("verified primary source requires a bound primary PDF")
+    adj_path, adj_sha = row["adjudication_path"], row["adjudication_sha256"]
+    if adj_path is not None:
+        path = Path(str(adj_path))
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != adj_sha:
+            raise ValueError("primary source adjudication hash binding mismatch")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("primary source adjudication is not valid UTF-8 JSON") from exc
+        if not isinstance(data, dict) or set(data) != _ADJUDICATION_FIELDS or data.get("schema_version") != "source_review_adjudication.v1":
+            raise ValueError("primary source adjudication has unexpected or missing fields")
+        if (
+            type(data.get("canonical_arxiv_id")) is not str
+            or not re.fullmatch(r"\d{4}\.\d{4,5}", data["canonical_arxiv_id"])
+            or type(data.get("source_version")) is not str
+            or not re.fullmatch(r"v[1-9][0-9]*", data["source_version"])
+            or row["source_version"] != data["source_version"]
+            or data.get("source_status") != {
+                "SOURCE_WITHDRAWN": "WITHDRAWN_SOURCE",
+                "SOURCE_REJECTED": "REJECTED_SOURCE",
+            }.get(str(row["source_status"]), row["source_status"])
+            or (data.get("source_status") == "WITHDRAWN_SOURCE" and data.get("scientific_admission") != "QUARANTINE_FOR_SCIENTIFIC_USE")
+            or (data.get("source_status") == "REJECTED_SOURCE" and data.get("scientific_admission") != "REJECT_FOR_SCIENTIFIC_USE")
+        ):
+            raise ValueError("primary source adjudication identity/status mismatch")
+        exact_id = f"arxiv:{data['canonical_arxiv_id'].lower()}{data['source_version']}"
+        aliases = {str(value).lower() for value in row["source_record_ids"]}
+        if exact_id not in aliases and f"arxiv_existing:{exact_id.split(':', 1)[1]}" not in aliases:
+            raise ValueError("primary source adjudication identity is not bound to this canonical note")
+
+
 def enumerate_candidates(config: CorpusRouterConfig) -> tuple[CorpusCandidate, ...]:
     """Read list membership once, excluding audits before any content is read."""
 
@@ -262,7 +450,14 @@ def enumerate_candidates(config: CorpusRouterConfig) -> tuple[CorpusCandidate, .
         (str(path), sha256_file(path)) for path in preflighted_lists
     )
     list_hashes = dict(list_manifest)
-    discovered: dict[str, tuple[Path, list[str]]] = {}
+    primary_binding: tuple[str, str] | None = None
+    primary_records: dict[str, dict[str, object]] = {}
+    if config.protocol_version == "v3":
+        if config.source_primary_manifest is None:
+            raise ValueError("v3 requires a primary source manifest")
+        manifest_path, manifest_sha, primary_records = _load_primary_source_manifest(config.source_primary_manifest)
+        primary_binding = (manifest_path, manifest_sha)
+    discovered: dict[Path, tuple[str, list[str]]] = {}
     for source_list in preflighted_lists:
         source = str(source_list)
         for path in _read_candidate_paths(source_list):
@@ -272,26 +467,46 @@ def enumerate_candidates(config: CorpusRouterConfig) -> tuple[CorpusCandidate, .
                 continue
             if not any(_is_within(path, root) for root in allowed_roots):
                 raise ValueError(f"candidate is outside configured candidate roots: {path}")
-            slug = _slug_for(path)
             if not path.is_file():
-                raise ValueError(f"missing base note for {slug}: {path}")
-            existing = discovered.get(slug)
-            if existing is None:
-                discovered[slug] = (path, [source])
+                if config.protocol_version == "v2":
+                    raise ValueError(f"missing base note for {_slug_for(path)}: {path}")
+                raise ValueError(f"missing base note: {path}")
+            if config.protocol_version == "v3":
+                record = primary_records.get(str(path))
+                if record is None:
+                    raise ValueError(f"primary source manifest is missing canonical note binding: {path}")
+                slug = str(record["slug"])
+                _validate_primary_source_row(
+                    record, note_path=path, note_sha256=sha256_file(path), papers_root=corpus_root
+                )
             else:
-                previous_path, memberships = existing
-                if previous_path != path:
-                    raise ValueError(f"duplicate slug {slug} points to different base files")
+                slug = _slug_for(path)
+            existing = discovered.get(path)
+            if existing is None:
+                if any(previous_slug == slug and previous_path != path for previous_path, (previous_slug, _) in discovered.items()):
+                    if config.protocol_version == "v2":
+                        raise ValueError(f"duplicate slug {slug} points to different base files")
+                    raise ValueError(f"duplicate stable candidate slug {slug}")
+                discovered[path] = (slug, [source])
+            else:
+                previous_slug, memberships = existing
+                if previous_slug != slug:
+                    raise ValueError(f"candidate path changed stable slug: {path}")
                 if source not in memberships:
                     memberships.append(source)
-    missing_controls = sorted(set(config.bridge_regression_slugs) - set(discovered))
+    if config.protocol_version == "v3" and set(primary_records) != {str(path) for path in discovered}:
+        raise ValueError("primary source manifest must exactly cover candidate notes")
+    slugs = {slug for slug, _ in discovered.values()}
+    missing_controls = sorted(set(config.bridge_regression_slugs) - slugs)
     if missing_controls:
         raise ValueError(
             "missing configured bridge regression candidates: "
             + ", ".join(missing_controls)
         )
-    return tuple(
-        CorpusCandidate(
+    candidates: list[CorpusCandidate] = []
+    for path, (slug, memberships) in sorted(discovered.items(), key=lambda item: item[1][0]):
+        record = primary_records.get(str(path)) if config.protocol_version == "v3" else None
+        candidates.append(CorpusCandidate(
             slug=slug,
             note_path=path,
             source_lists=tuple(sorted(memberships)),
@@ -301,13 +516,24 @@ def enumerate_candidates(config: CorpusRouterConfig) -> tuple[CorpusCandidate, .
             allowed_note_root=str(config.notes_root),
             allowed_papers_root=str(corpus_root),
             legacy_ledger_path=str(config.legacy_ledger),
-        )
-        for slug, (path, memberships) in sorted(discovered.items())
-    )
+            protocol_version=config.protocol_version,
+            source_primary_manifest_binding=primary_binding,
+            source_pdf_path=record["primary_pdf_path"] if record is not None else None,
+            source_pdf_sha256=record["primary_pdf_sha256"] if record is not None else None,
+            source_record_aliases=tuple(record["source_record_ids"]) if record is not None else (),
+            source_status=str(record["source_status"]) if record is not None else "NOT_ADJUDICATED",
+            source_version=record["source_version"] if record is not None else None,
+            source_adjudication_binding=(
+                (str(record["adjudication_path"]), str(record["adjudication_sha256"]))
+                if record is not None and record["adjudication_path"] is not None else None
+            ),
+            primary_source_record=record,
+        ))
+    return tuple(candidates)
 
 
 def _candidate_record(candidate: CorpusCandidate) -> dict[str, object]:
-    return {
+    record = {
         "record_id": f"corpus-{candidate.slug}",
         "slug": candidate.slug,
         "note_path": str(candidate.note_path),
@@ -325,6 +551,16 @@ def _candidate_record(candidate: CorpusCandidate) -> dict[str, object]:
         "legacy_ledger_path": candidate.legacy_ledger_path,
         "note_sha256": candidate.note_sha256,
     }
+    if candidate.protocol_version == "v3":
+        record.update({
+            "primary_source_manifest_binding": {
+                "path": candidate.source_primary_manifest_binding[0],
+                "sha256": candidate.source_primary_manifest_binding[1],
+            },
+            "primary_source_record": candidate.primary_source_record,
+            "source_record_aliases": list(candidate.source_record_aliases),
+        })
+    return record
 
 
 def _owned_corpus_paths(active_run_dir: Path) -> dict[str, Path]:
@@ -353,14 +589,32 @@ def router_job_id(slug: str, note_sha256: str, prompt_sha256: str) -> str:
     )
 
 
+def _protocol_values(protocol_version: str) -> tuple[str, str, str, dict[str, object]]:
+    if protocol_version == "v2":
+        return PROMPT_VERSION, ROUTER_JOB_SCHEMA_VERSION, ROUTER_RESULT_SCHEMA_VERSION, REQUIRED_OUTPUT_SCHEMA
+    if protocol_version == "v3":
+        return V3_PROMPT_VERSION, V3_ROUTER_JOB_SCHEMA_VERSION, V3_ROUTER_RESULT_SCHEMA_VERSION, V3_REQUIRED_OUTPUT_SCHEMA
+    raise ValueError(f"unsupported corpus routing protocol: {protocol_version}")
+
+
+def _protocol_job_id(slug: str, note_sha256: str, prompt_sha256: str, protocol_version: str) -> str:
+    _, _, result_schema, _ = _protocol_values(protocol_version)
+    if protocol_version == "v2":
+        return router_job_id(slug, note_sha256, prompt_sha256)
+    return stable_id("router_job", slug, note_sha256, prompt_sha256, result_schema)
+
+
 def write_router_jobs(
     candidates: Sequence[CorpusCandidate],
     active_run_dir: Path,
     *,
     prompt_path: Path,
+    protocol_version: str = "v2",
 ) -> Path:
     """Replace the run-local job file, never modifying caller-owned source lists."""
 
+    if any(getattr(candidate, "protocol_version", "v2") != protocol_version for candidate in candidates):
+        raise ValueError("router candidates do not match the selected protocol version")
     owned_paths = _owned_corpus_paths(active_run_dir)
     owned_paths["router_results"].unlink(missing_ok=True)
     owned_paths["policy"].unlink(missing_ok=True)
@@ -375,6 +629,7 @@ def write_router_jobs(
             f"router prompt must be a readable UTF-8 file: {resolved_prompt}"
         ) from exc
     prompt_sha256 = hashlib.sha256(prompt_bytes).hexdigest()
+    prompt_version, job_schema_version, result_schema_version, output_schema = _protocol_values(protocol_version)
     records: list[dict[str, object]] = []
     for candidate in sorted(candidates, key=lambda item: item.slug):
         try:
@@ -386,21 +641,21 @@ def write_router_jobs(
             ) from exc
         if hashlib.sha256(note_bytes).hexdigest() != candidate.note_sha256:
             raise ValueError(f"candidate note changed after enumeration: {candidate.slug}")
-        job_id = router_job_id(candidate.slug, candidate.note_sha256, prompt_sha256)
+        job_id = _protocol_job_id(candidate.slug, candidate.note_sha256, prompt_sha256, protocol_version)
         records.append(
             _candidate_record(candidate)
             | {
                 "record_id": job_id,
-                "schema_version": ROUTER_JOB_SCHEMA_VERSION,
+                "schema_version": job_schema_version,
                 "job_id": job_id,
                 "note_text": note_text,
                 "prompt_id": "corpus_router",
-                "prompt_version": PROMPT_VERSION,
+                "prompt_version": prompt_version,
                 "prompt_path": str(resolved_prompt),
                 "prompt_sha256": prompt_sha256,
                 "prompt_text": prompt_text,
-                "result_schema_version": ROUTER_RESULT_SCHEMA_VERSION,
-                "required_output_schema": REQUIRED_OUTPUT_SCHEMA,
+                "result_schema_version": result_schema_version,
+                "required_output_schema": output_schema,
             }
         )
     path = owned_paths["jobs"]
@@ -431,6 +686,13 @@ def _validate_router_jobs(path: Path) -> list[dict[str, object]]:
     jobs = read_jsonl(jobs_path)
     if not jobs:
         raise ValueError("router jobs must be nonempty")
+    if any(
+        set(job) != ROUTER_JOB_FIELDS | ({
+            "primary_source_manifest_binding", "primary_source_record", "source_record_aliases",
+        } if job.get("schema_version") == V3_ROUTER_JOB_SCHEMA_VERSION else set())
+        for job in jobs
+    ):
+        raise ValueError("router jobs contain unexpected or missing fields")
     if len({job.get("slug") for job in jobs}) != len(jobs) or len({job.get("job_id") for job in jobs}) != len(jobs):
         raise ValueError("router jobs contain duplicate slugs or job IDs")
     first = jobs[0]
@@ -447,8 +709,32 @@ def _validate_router_jobs(path: Path) -> list[dict[str, object]]:
             raise ValueError(f"candidate list is missing or outside allowed papers root: {list_path}")
         if sha256_file(candidate_list) != digest:
             raise ValueError(f"candidate list changed after routing: {list_path}")
+    protocols = {
+        "v2" if job.get("schema_version") == ROUTER_JOB_SCHEMA_VERSION else
+        "v3" if job.get("schema_version") == V3_ROUTER_JOB_SCHEMA_VERSION else
+        "unsupported"
+        for job in jobs
+    }
+    if len(protocols) != 1 or "unsupported" in protocols:
+        raise ValueError("router job schema binding mismatch")
+    protocol_version = next(iter(protocols))
+    prompt_version, job_schema_version, result_schema_version, output_schema = _protocol_values(protocol_version)
+    primary_manifest_binding: tuple[str, str] | None = None
+    primary_records: dict[str, dict[str, object]] = {}
+    if protocol_version == "v3":
+        raw_binding = jobs[0].get("primary_source_manifest_binding")
+        if not isinstance(raw_binding, dict) or set(raw_binding) != {"path", "sha256"}:
+            raise ValueError("primary source manifest binding is malformed")
+        manifest_path, manifest_sha = raw_binding["path"], raw_binding["sha256"]
+        if type(manifest_path) is not str or type(manifest_sha) is not str:
+            raise ValueError("primary source manifest binding is malformed")
+        loaded_path, loaded_sha, primary_records = _load_primary_source_manifest(Path(manifest_path))
+        if (loaded_path, loaded_sha) != (manifest_path, manifest_sha):
+            raise ValueError("primary source manifest hash binding mismatch")
+        primary_manifest_binding = (manifest_path, manifest_sha)
+    routed_primary_notes: set[str] = set()
     for job in jobs:
-        if job.get("schema_version") != ROUTER_JOB_SCHEMA_VERSION or job.get("result_schema_version") != ROUTER_RESULT_SCHEMA_VERSION:
+        if job.get("schema_version") != job_schema_version or job.get("result_schema_version") != result_schema_version:
             raise ValueError("router job schema binding mismatch")
         if tuple(job.get(key) for key in ("allowed_note_root", "allowed_papers_root", "legacy_ledger_path")) != roots:
             raise ValueError("router jobs contain mixed provenance roots")
@@ -469,6 +755,18 @@ def _validate_router_jobs(path: Path) -> list[dict[str, object]]:
             raise ValueError("router job note is not UTF-8") from exc
         if sha256_file(note) != job.get("note_sha256") or note_text != job.get("note_text"):
             raise ValueError("router job note binding mismatch")
+        if job.get("schema_version") == V3_ROUTER_JOB_SCHEMA_VERSION:
+            if job.get("primary_source_manifest_binding") != {
+                "path": primary_manifest_binding[0], "sha256": primary_manifest_binding[1],
+            }:
+                raise ValueError("router jobs contain mixed primary source manifests")
+            if job.get("primary_source_record") != primary_records.get(str(note)):
+                raise ValueError("router job primary source identity binding mismatch")
+            primary = job["primary_source_record"]
+            if primary.get("slug") != job.get("slug") or job.get("source_record_aliases") != primary.get("source_record_ids"):
+                raise ValueError("router job stable slug does not match primary source manifest")
+            _validate_primary_source_row(primary, note_path=note, note_sha256=str(job["note_sha256"]), papers_root=papers_root)
+            routed_primary_notes.add(str(note))
         for list_path, digest in bindings:
             if (list_path, digest) not in manifest or note not in set(_read_candidate_paths(Path(list_path))):
                 raise ValueError("router job source list does not contain canonical note path")
@@ -479,17 +777,19 @@ def _validate_router_jobs(path: Path) -> list[dict[str, object]]:
         except UnicodeDecodeError as exc:
             raise ValueError("router prompt is not UTF-8") from exc
         prompt_sha = hashlib.sha256(prompt_bytes).hexdigest()
-        expected_id = router_job_id(str(job.get("slug")), str(job.get("note_sha256")), prompt_sha)
+        expected_id = _protocol_job_id(str(job.get("slug")), str(job.get("note_sha256")), prompt_sha, protocol_version)
         if (
             job.get("prompt_sha256") != prompt_sha
             or job.get("prompt_text") != prompt_text
             or job.get("prompt_id") != "corpus_router"
-            or job.get("prompt_version") != PROMPT_VERSION
-            or job.get("required_output_schema") != REQUIRED_OUTPUT_SCHEMA
+            or job.get("prompt_version") != prompt_version
+            or job.get("required_output_schema") != output_schema
             or job.get("job_id") != expected_id
             or job.get("record_id") != expected_id
         ):
             raise ValueError("router job prompt or ID binding mismatch")
+    if protocol_version == "v3" and routed_primary_notes != set(primary_records):
+        raise ValueError("primary source manifest does not exactly match routed candidate notes")
     return jobs
 
 
@@ -516,6 +816,10 @@ def _replay_router_results(
             or result.note_sha256 != job["note_sha256"]
             or result.prompt_sha256 != job["prompt_sha256"]
             or result.schema_version != job["result_schema_version"]
+            or (
+                job["result_schema_version"] == V3_ROUTER_RESULT_SCHEMA_VERSION
+                and result.label.value not in {"GENERAL_RESEARCH", "OTHER"}
+            )
         ):
             raise ValueError("router result binding mismatch")
         candidate = CorpusCandidate(
@@ -528,6 +832,21 @@ def _replay_router_results(
             allowed_note_root=str(job["allowed_note_root"]),
             allowed_papers_root=str(job["allowed_papers_root"]),
             legacy_ledger_path=str(job["legacy_ledger_path"]),
+            protocol_version=("v3" if job["result_schema_version"] == V3_ROUTER_RESULT_SCHEMA_VERSION else "v2"),
+            source_primary_manifest_binding=(
+                (str(job["primary_source_manifest_binding"]["path"]), str(job["primary_source_manifest_binding"]["sha256"]))
+                if isinstance(job.get("primary_source_manifest_binding"), dict) else None
+            ),
+            source_pdf_path=(job["primary_source_record"]["primary_pdf_path"] if isinstance(job.get("primary_source_record"), dict) else None),
+            source_pdf_sha256=(job["primary_source_record"]["primary_pdf_sha256"] if isinstance(job.get("primary_source_record"), dict) else None),
+            source_record_aliases=tuple(job["primary_source_record"]["source_record_ids"]) if isinstance(job.get("primary_source_record"), dict) else (),
+            source_status=str(job["primary_source_record"]["source_status"]) if isinstance(job.get("primary_source_record"), dict) else "NOT_ADJUDICATED",
+            source_version=job["primary_source_record"].get("source_version") if isinstance(job.get("primary_source_record"), dict) else None,
+            source_adjudication_binding=(
+                (str(job["primary_source_record"]["adjudication_path"]), str(job["primary_source_record"]["adjudication_sha256"]))
+                if isinstance(job.get("primary_source_record"), dict) and job["primary_source_record"].get("adjudication_path") is not None else None
+            ),
+            primary_source_record=(job.get("primary_source_record") if isinstance(job.get("primary_source_record"), dict) else None),
         )
         replayed.append(IngestedRouterResult(candidate, result, str(raw_hash)))
     return tuple(replayed)
@@ -630,13 +949,17 @@ def ingest_router_results(
     candidates: Sequence[CorpusCandidate], results: Sequence[RouterResult | dict[str, object]],
     *,
     prompt_sha256: str,
+    protocol_version: str = "v2",
 ) -> tuple[IngestedRouterResult, ...]:
     """Validate a complete, one-to-one router response batch against candidates."""
 
     candidate_by_slug = {candidate.slug: candidate for candidate in candidates}
     if len(candidate_by_slug) != len(candidates):
         raise ValueError("candidate slugs must be unique")
+    if any(getattr(candidate, "protocol_version", "v2") != protocol_version for candidate in candidates):
+        raise ValueError("router candidates do not match the selected protocol version")
     parsed: list[RouterResult] = []
+    _, _, expected_result_schema, _ = _protocol_values(protocol_version)
     seen: set[str] = set()
     for supplied in results:
         try:
@@ -653,10 +976,16 @@ def ingest_router_results(
         if item.slug not in candidate_by_slug:
             raise ValueError(f"unexpected slug in router results: {item.slug}")
         candidate = candidate_by_slug[item.slug]
+        if item.schema_version != expected_result_schema:
+            raise ValueError(f"router result protocol mismatch for {item.slug}")
+        if protocol_version == "v3" and item.label.value not in {"GENERAL_RESEARCH", "OTHER"}:
+            raise ValueError(f"v3 router result label is not a corpus admission decision: {item.slug}")
+        if protocol_version == "v2" and item.label.value not in V2_LABELS:
+            raise ValueError(f"v2 router result label is not part of the frozen v2 enum: {item.slug}")
         expected_bindings = {
             "note_sha256": candidate.note_sha256,
             "prompt_sha256": prompt_sha256,
-            "job_id": router_job_id(item.slug, candidate.note_sha256, prompt_sha256),
+            "job_id": _protocol_job_id(item.slug, candidate.note_sha256, prompt_sha256, protocol_version),
         }
         for field_name, expected_value in expected_bindings.items():
             if getattr(item, field_name) != expected_value:
@@ -748,7 +1077,14 @@ def _selection_decisions(
     eligible: list[IngestedRouterResult] = []
     rejected: list[RejectedCandidate] = []
     for item in ingested:
-        if item.result.label == CorpusLabel.OTHER:
+        if item.candidate.source_status in {"SOURCE_WITHDRAWN", "SOURCE_REJECTED", "SOURCE_UNAVAILABLE", "SOURCE_STATUS_PENDING"}:
+            reason = {
+                "SOURCE_WITHDRAWN": "SOURCE_WITHDRAWN",
+                "SOURCE_REJECTED": "SOURCE_REJECTED",
+                "SOURCE_UNAVAILABLE": "SOURCE_UNAVAILABLE",
+                "SOURCE_STATUS_PENDING": "SOURCE_STATUS_PENDING",
+            }[item.candidate.source_status]
+        elif item.result.label == CorpusLabel.OTHER:
             reason = "LABEL_OTHER"
         elif item.result.label.value not in allowed_labels:
             reason = "LABEL_NOT_ALLOWED"
@@ -758,6 +1094,17 @@ def _selection_decisions(
             eligible.append(item)
             continue
         rejected.append(RejectedCandidate(item.candidate, item.result, item.raw_result_sha256, reason))
+    unique_eligible: list[IngestedRouterResult] = []
+    occupied_content_ids: set[str] = set()
+    for item in sorted(eligible, key=lambda row: row.candidate.slug):
+        identity = item.candidate.source_pdf_sha256 if item.candidate.source_status == "PRIMARY_SOURCE_VERIFIED" else None
+        if identity and identity in occupied_content_ids:
+            rejected.append(RejectedCandidate(item.candidate, item.result, item.raw_result_sha256, "SOURCE_ALIAS_DUPLICATE"))
+            continue
+        if identity:
+            occupied_content_ids.add(identity)
+        unique_eligible.append(item)
+    eligible = unique_eligible
     target_min = int(_policy_value(policy, "target_min"))
     if len(eligible) < target_min:
         raise ValueError(f"eligible corpus ({len(eligible)}) is below target_min ({target_min})")

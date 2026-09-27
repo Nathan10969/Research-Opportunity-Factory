@@ -32,7 +32,8 @@ def test_d09_d07_labels_are_explicit_and_schema_is_derived() -> None:
     assert CorpusLabel.SHIFT_ROBUSTNESS.value == "SHIFT_ROBUSTNESS"
     assert CorpusLabel.SUPERVISION_SHIFT_BRIDGE.value == "SUPERVISION_SHIFT_BRIDGE"
     assert REQUIRED_OUTPUT_SCHEMA["properties"]["label"]["enum"] == [
-        label.value for label in CorpusLabel
+        "KV_CACHE", "LONG_MEMORY", "BRIDGE", "HUMAN_SUPERVISION",
+        "SHIFT_ROBUSTNESS", "SUPERVISION_SHIFT_BRIDGE", "OTHER",
     ]
 
 

@@ -30,6 +30,7 @@ from .stage_io import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PROMPTS = {
     "corpus": REPOSITORY_ROOT / "prompts" / "corpus_router.md",
+    "corpus_v3": REPOSITORY_ROOT / "prompts" / "corpus_router_v3.md",
     "card": REPOSITORY_ROOT / "prompts" / "paper_card.md",
     "opportunity": REPOSITORY_ROOT / "prompts" / "opportunity_miner.md",
     "route": REPOSITORY_ROOT / "prompts" / "route_generator.md",
@@ -557,12 +558,15 @@ class RealBackend:
 
     def emit_corpus_jobs(self, run: Path, *, config: Any, prompt: Path, **_: object) -> None:
         from .corpus import enumerate_candidates, write_router_jobs
-        write_router_jobs(enumerate_candidates(config), run, prompt_path=prompt)
+        write_router_jobs(enumerate_candidates(config), run, prompt_path=prompt, protocol_version=config.protocol_version)
 
     def ingest_corpus_labels(self, run: Path, *, config: Any, results: Path, prompt: Path, **_: object) -> None:
         from .corpus import enumerate_candidates, ingest_router_results, select_pilot
         candidates = enumerate_candidates(config)
-        ingested = ingest_router_results(candidates, _jsonl_objects(results), prompt_sha256=sha256_file(prompt))
+        ingested = ingest_router_results(
+            candidates, _jsonl_objects(results), prompt_sha256=sha256_file(prompt),
+            protocol_version=config.protocol_version,
+        )
         select_pilot(config, ingested, run)
 
     def emit_card_jobs(self, run: Path, *, prompt: Path, **_: object) -> None:
@@ -780,8 +784,14 @@ def _effective_input_paths(run: Path, command: str, config: Any) -> dict[str, Pa
     for index, path in enumerate(config.candidate_lists):
         paths[f"candidate_list_{index}"] = Path(path)
     paths["legacy_ledger"] = Path(config.legacy_ledger)
+    if config.source_primary_manifest is not None:
+        paths["primary_source_manifest"] = Path(config.source_primary_manifest)
     for candidate in enumerate_candidates(config):
         paths[f"note_{candidate.slug}"] = candidate.note_path
+        if candidate.source_pdf_path is not None:
+            paths[f"primary_pdf_{candidate.slug}"] = Path(candidate.source_pdf_path)
+        if candidate.source_adjudication_binding is not None:
+            paths[f"source_adjudication_{candidate.slug}"] = Path(candidate.source_adjudication_binding[0])
     for relpath in _UPSTREAM_FILES.get(command, ()):
         path = run / relpath
         if not path.is_file():
@@ -815,7 +825,12 @@ def init_run(run_dir: Path, config_path: Path, *, mode: str = "live", new_run: b
             "notes_root", "candidate_lists", "legacy_ledger", "target_min",
             "target_max", "allowed_labels", "bridge_regression_slugs",
         }
-        if set(payload) != expected_config_keys or type(payload.get("candidate_lists")) is not list:
+        valid_config_keys = {
+            frozenset(expected_config_keys),
+            frozenset(expected_config_keys | {"protocol_version"}),
+            frozenset(expected_config_keys | {"protocol_version", "source_primary_manifest"}),
+        }
+        if frozenset(payload) not in valid_config_keys or type(payload.get("candidate_lists")) is not list:
             raise PipelineError("corpus router config has missing or unexpected fields")
         path_values = (
             Path(str(payload["notes_root"])), Path(str(payload["legacy_ledger"])),
@@ -859,7 +874,10 @@ def _execute_unlocked(command: str, run_dir: Path, config_path: Path | None, *, 
         "emit-corpus-jobs": "corpus", "ingest-corpus-labels": "corpus",
         "emit-card-jobs": "card", "emit-opportunity-jobs": "opportunity",
     }.get(command)
-    selected_prompt = Path(prompt).resolve(strict=True) if prompt is not None else (DEFAULT_PROMPTS[prompt_key] if prompt_key else None)
+    selected_prompt = Path(prompt).resolve(strict=True) if prompt is not None else (
+        DEFAULT_PROMPTS["corpus_v3"] if prompt_key == "corpus" and config.protocol_version == "v3"
+        else DEFAULT_PROMPTS[prompt_key] if prompt_key else None
+    )
     route_prompt = Path(route_prompt).resolve(strict=True) if route_prompt else DEFAULT_PROMPTS["route"]
     review_prompt = Path(review_prompt).resolve(strict=True) if review_prompt else DEFAULT_PROMPTS["review"]
     paths: dict[str, Path | None] = {"results": results, "prompt": selected_prompt, "reviewed_assignments": reviewed_assignments, "recon_context": recon_context, "execution_bundle": execution_bundle}
