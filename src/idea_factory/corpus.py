@@ -703,12 +703,14 @@ def _validate_router_jobs(path: Path) -> list[dict[str, object]]:
     manifest = _binding_pairs(first.get("candidate_list_manifest"), "candidate_list_manifest")
     if not manifest:
         raise ValueError("candidate_list_manifest must be nonempty")
+    candidate_memberships: dict[str, set[Path]] = {}
     for list_path, digest in manifest:
         candidate_list = Path(list_path)
         if str(candidate_list.resolve()) != list_path or not _is_within(candidate_list, papers_root) or not candidate_list.is_file():
             raise ValueError(f"candidate list is missing or outside allowed papers root: {list_path}")
         if sha256_file(candidate_list) != digest:
             raise ValueError(f"candidate list changed after routing: {list_path}")
+        candidate_memberships[list_path] = set(_read_candidate_paths(candidate_list))
     protocols = {
         "v2" if job.get("schema_version") == ROUTER_JOB_SCHEMA_VERSION else
         "v3" if job.get("schema_version") == V3_ROUTER_JOB_SCHEMA_VERSION else
@@ -768,7 +770,7 @@ def _validate_router_jobs(path: Path) -> list[dict[str, object]]:
             _validate_primary_source_row(primary, note_path=note, note_sha256=str(job["note_sha256"]), papers_root=papers_root)
             routed_primary_notes.add(str(note))
         for list_path, digest in bindings:
-            if (list_path, digest) not in manifest or note not in set(_read_candidate_paths(Path(list_path))):
+            if (list_path, digest) not in manifest or note not in candidate_memberships[list_path]:
                 raise ValueError("router job source list does not contain canonical note path")
         prompt = Path(str(job.get("prompt_path"))).resolve()
         prompt_bytes = prompt.read_bytes()
@@ -790,6 +792,9 @@ def _validate_router_jobs(path: Path) -> list[dict[str, object]]:
             raise ValueError("router job prompt or ID binding mismatch")
     if protocol_version == "v3" and routed_primary_notes != set(primary_records):
         raise ValueError("primary source manifest does not exactly match routed candidate notes")
+    for list_path, digest in manifest:
+        if sha256_file(Path(list_path)) != digest:
+            raise ValueError(f"candidate list changed during router job validation: {list_path}")
     return jobs
 
 

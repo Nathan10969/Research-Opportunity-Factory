@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import idea_factory.corpus as corpus_module
 
 from idea_factory.artifacts import read_jsonl
 from idea_factory.corpus import (
@@ -58,6 +59,25 @@ def _primary_record(note: Path, pdf: Path | None, *, aliases: list[str], status:
         "adjudication_path": str(adjudication.resolve()) if adjudication is not None else None,
         "adjudication_sha256": hashlib.sha256(adjudication.read_bytes()).hexdigest() if adjudication is not None else None,
     }
+
+
+def _router_validation_config(tmp_path: Path):
+    notes_root = tmp_path / "notes"
+    notes_root.mkdir()
+    note_names = ("paper-a", "paper-kv", "paper-memory", "paper-bridge", "paper-keyword")
+    notes = []
+    for name in note_names:
+        note = notes_root / f"{name}.md"
+        note.write_text(f"# {name}\n\nFixture content.\n", encoding="utf-8")
+        notes.append(note)
+    base = scoped_config(tmp_path, notes)
+    list_root = base.legacy_ledger.parent.parent / "candidate-lists"
+    list_root.mkdir()
+    first = list_root / "list-one.txt"
+    second = list_root / "list-two.txt"
+    first.write_text("".join(f"{note}\n" for note in notes[:4]), encoding="utf-8")
+    second.write_text("".join(f"{note}\n" for note in (notes[0], notes[3], notes[4])), encoding="utf-8")
+    return replace(base, candidate_lists=(first, second))
 
 
 def test_general_research_label_does_not_mutate_frozen_v2_schema() -> None:
@@ -150,6 +170,63 @@ def test_prechange_v2_job_fixture_replays_with_original_prompt_schema_and_ids(tm
     assert all(job["schema_version"] == "idea_factory.corpus_router_job.v2" for job in current_jobs)
     assert all(job["required_output_schema"] == REQUIRED_OUTPUT_SCHEMA for job in current_jobs)
     assert all(job["job_id"] == router_job_id(job["slug"], job["note_sha256"], job["prompt_sha256"]) for job in current_jobs)
+
+
+def test_router_validation_expands_each_candidate_list_once_per_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from idea_factory.corpus import enumerate_candidates
+
+    prompt = Path(__file__).parents[1] / "prompts" / "corpus_router.md"
+    jobs_path = write_router_jobs(
+        enumerate_candidates(_router_validation_config(tmp_path)), tmp_path / "run", prompt_path=prompt,
+    )
+    jobs = read_jsonl(jobs_path)
+    expected_paths = {
+        entry["path"]
+        for job in jobs
+        for entry in job["source_list_bindings"]
+    }
+    original = corpus_module._read_candidate_paths
+    expanded: list[str] = []
+
+    def tracked(source_list: Path):
+        expanded.append(str(source_list))
+        return original(source_list)
+
+    monkeypatch.setattr(corpus_module, "_read_candidate_paths", tracked)
+    assert len(_validate_router_jobs(jobs_path)) == len(jobs)
+    assert len(expanded) == len(expected_paths)
+    assert set(expanded) == expected_paths
+    assert len(_validate_router_jobs(jobs_path)) == len(jobs)
+    assert len(expanded) == 2 * len(expected_paths)
+
+
+def test_router_validation_rejects_candidate_list_changed_during_membership_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from idea_factory.corpus import enumerate_candidates
+
+    prompt = Path(__file__).parents[1] / "prompts" / "corpus_router.md"
+    jobs_path = write_router_jobs(
+        enumerate_candidates(_router_validation_config(tmp_path)), tmp_path / "run", prompt_path=prompt,
+    )
+    jobs = read_jsonl(jobs_path)
+    list_path = Path(jobs[0]["candidate_list_manifest"][0]["path"])
+    original = corpus_module._read_candidate_paths
+    changed = False
+
+    def mutate_after_first_scan(source_list: Path):
+        nonlocal changed
+        paths = original(source_list)
+        if source_list == list_path and not changed:
+            source_list.write_bytes(source_list.read_bytes() + b"\n")
+            changed = True
+        return paths
+
+    monkeypatch.setattr(corpus_module, "_read_candidate_paths", mutate_after_first_scan)
+    with pytest.raises(ValueError, match="candidate list changed during router job validation"):
+        _validate_router_jobs(jobs_path)
 
 
 def test_v3_admission_jobs_select_general_research_but_reject_other(tmp_path: Path) -> None:
