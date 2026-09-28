@@ -149,19 +149,24 @@ def _unique_by_item(rows: list[dict], label: str) -> dict[str, dict]:
 def _physical_line(data: bytes, line_number: object, label: str) -> bytes:
     if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
         raise ValueError(f"{label} line number must be a positive one-based integer")
-    lines = data.splitlines(keepends=True)
+    lines = data.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
     if line_number > len(lines):
         raise ValueError(f"{label} physical line {line_number} is absent")
     raw = lines[line_number - 1]
-    if not raw.endswith(b"\r\n"):
-        raise ValueError(f"{label} physical line {line_number} does not use the frozen CRLF convention")
+    json_bytes = raw[:-1] if raw.endswith(b"\r") else raw
+    if b"\r" in json_bytes:
+        raise ValueError(f"{label} physical line {line_number} contains an embedded carriage return")
+    if not json_bytes.strip():
+        raise ValueError(f"blank JSONL row in {label} at line {line_number}")
     return raw
 
 
 def _json_physical_line(data: bytes, line_number: int, label: str) -> dict:
     raw = _physical_line(data, line_number, label)
     try:
-        value = json.loads(raw[:-2].decode("utf-8"))
+        value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid {label} JSON at physical line {line_number}: {exc}") from exc
     if not isinstance(value, dict):

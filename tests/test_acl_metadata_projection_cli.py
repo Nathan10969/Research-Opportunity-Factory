@@ -43,6 +43,43 @@ def _json_bytes(value) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _producer_raw_lines(data: bytes) -> list[bytes]:
+    lines = data.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    return lines
+
+
+def test_physical_line_hash_bytes_match_frozen_producer_for_mixed_lf_and_crlf():
+    data = b'{"item_id":"queue"}\r\n{"item_id":"manifest"}\n'
+
+    assert BUILDER._physical_line(data, 1, "queue") == b'{"item_id":"queue"}\r'
+    assert BUILDER._physical_line(data, 2, "manifest") == b'{"item_id":"manifest"}'
+    assert BUILDER._json_physical_line(data, 1, "queue") == {"item_id": "queue"}
+    assert BUILDER._json_physical_line(data, 2, "manifest") == {"item_id": "manifest"}
+
+
+@pytest.mark.parametrize("data", [b'{"item_id":"x\ry"}\n', b'{"item_id":"x"}\rZ\n'])
+def test_physical_line_rejects_embedded_carriage_returns(data):
+    with pytest.raises(ValueError, match="embedded carriage return"):
+        BUILDER._physical_line(data, 1, "fixture")
+
+
+@pytest.mark.parametrize("data", [b"\n", b"\r\n"])
+def test_physical_line_rejects_blank_rows(data):
+    with pytest.raises(ValueError, match="blank JSONL row.*line 1"):
+        BUILDER._physical_line(data, 1, "fixture")
+
+
+def test_physical_line_numbers_follow_lf_delimited_physical_rows():
+    data = b'{"item_id":"first"}\n{"item_id":"second"}'
+
+    with pytest.raises(ValueError, match="physical line 3 is absent"):
+        BUILDER._physical_line(data, 3, "fixture")
+    with pytest.raises(ValueError, match="positive one-based integer"):
+        BUILDER._physical_line(data, 0, "fixture")
+
+
 def _pdftotext_path() -> str:
     executable = shutil.which("pdftotext")
     if executable is None:
@@ -153,10 +190,10 @@ def projection_inputs(tmp_path):
             "item_id": item_id,
             "queue_path": str(queue_path), "queue_file_sha256": _sha(queue_data),
             "queue_line_number": index,
-            "queue_raw_line_sha256": _sha(queue_data.splitlines(keepends=True)[index - 1]),
+            "queue_raw_line_sha256": _sha(_producer_raw_lines(queue_data)[index - 1]),
             "manifest_path": str(manifest_path), "manifest_file_sha256": _sha(manifest_data),
             "manifest_line_number": index,
-            "manifest_raw_line_sha256": _sha(manifest_data.splitlines(keepends=True)[index - 1]),
+            "manifest_raw_line_sha256": _sha(_producer_raw_lines(manifest_data)[index - 1]),
             "official_html_path": str(html_path), "official_html_sha256": _sha(html_path.read_bytes()),
             "pdf_path": str(pdf_paths[index - 1] if index <= 10 else extra_pdf_path),
             "pdf_sha256": _sha((pdf_paths[index - 1] if index <= 10 else extra_pdf_path).read_bytes()),
@@ -328,6 +365,40 @@ def test_projection_conserves_every_source_row_and_holds_missing_review(projecti
     assert receipt["downstream_card_use_approved"] is False
     assert receipt["toolchain"]["pdftotext_version"].startswith("pdftotext version ")
     assert len(receipt["toolchain"]["pdftotext_sha256"]) == 64
+    _assert_inputs_unchanged(data)
+
+
+def test_projection_uses_frozen_producer_row_hashes_for_lf_manifest_and_crlf_queue(projection_inputs):
+    data = projection_inputs
+    queue_path = data["proofs"][0]["queue_path"]
+    manifest_path = Path(data["proofs"][0]["manifest_path"])
+    manifest_path.write_bytes(manifest_path.read_bytes().replace(b"\r\n", b"\n"))
+    manifest_data = manifest_path.read_bytes()
+    manifest_lines = _producer_raw_lines(manifest_data)
+    queue_data = Path(queue_path).read_bytes()
+    queue_lines = _producer_raw_lines(queue_data)
+    for index, proof in enumerate(data["proofs"]):
+        proof["queue_raw_line_sha256"] = _sha(queue_lines[index])
+        proof["manifest_file_sha256"] = _sha(manifest_data)
+        proof["manifest_raw_line_sha256"] = _sha(manifest_lines[index])
+    proof_data = _write_jsonl(data["proof_path"], data["proofs"])
+    for index, review in enumerate(data["reviews"]):
+        review["proof_row_sha256"] = _sha(_json_bytes(data["proofs"][index]))
+    reviews_data = _write_jsonl(data["reviews_path"], data["reviews"])
+    receipt = json.loads(data["proof_receipt_path"].read_text(encoding="utf-8"))
+    receipt["final_proof_only_run"]["rows_sha256"] = _sha(proof_data)
+    data["proof_receipt_path"].write_bytes(_json_bytes(receipt))
+    _repin_test_parent(data)
+    for path in (manifest_path, data["proof_path"], data["reviews_path"], data["proof_receipt_path"]):
+        data["snapshots"][path] = _sha(path.read_bytes())
+
+    result = _run(data)
+
+    assert result.returncode == 0, result.stderr
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(projection) == 670
+    assert sum(row["status"] == "SUPPORTED" for row in projection) == 10
+    assert sum(row["status"] == "METADATA_HOLD" for row in projection) == 660
     _assert_inputs_unchanged(data)
 
 
