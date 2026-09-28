@@ -478,6 +478,18 @@ def build(args: argparse.Namespace) -> Path:
         selected_proofs = proof_by_id
 
     _verify_proof_source_rows(proof_rows, root, snapshots)
+    for item_id, proof in selected_proofs.items():
+        page1 = page1_by_id.get(item_id)
+        review = review_by_id.get(item_id)
+        if page1 is not None and page1.get("pdf_sha256") != proof.get("pdf_sha256"):
+            raise ValueError(f"{item_id}: page1 PDF hash does not match the parent proof")
+        if review is not None:
+            if review.get("pdf_sha256") != proof.get("pdf_sha256"):
+                raise ValueError(f"{item_id}: review PDF hash does not match the parent proof")
+            if review.get("proof_row_sha256") != _canonical_sha(proof):
+                raise ValueError(f"{item_id}: review proof-row hash does not match the parent proof")
+            if page1 is not None and review.get("page1_text_sha256") != page1.get("page1_text_sha256"):
+                raise ValueError(f"{item_id}: review page1 text hash does not match the page1 witness")
     projection_rows: list[dict] = []
     diagnostic_rows: list[dict] = []
     for item_id in sorted(selected_proofs):

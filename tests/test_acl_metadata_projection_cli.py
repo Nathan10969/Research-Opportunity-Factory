@@ -14,7 +14,7 @@ import pytest
 
 
 WORKTREE = Path(__file__).resolve().parents[1]
-PYTHON = Path(r"F:\LLM_Evoke\idea_factory\.venv\Scripts\python.exe")
+PYTHON = sys.executable
 CLI = WORKTREE / "scripts" / "build_acl_metadata_projection.py"
 _SPEC = importlib.util.spec_from_file_location("acl_metadata_projection_cli", CLI)
 BUILDER = importlib.util.module_from_spec(_SPEC)
@@ -477,15 +477,47 @@ def test_evidence_id_outside_parent_is_rejected_without_output(projection_inputs
     _assert_inputs_unchanged(data)
 
 
-def test_review_bound_to_wrong_proof_hash_is_rejected_without_output(projection_inputs):
+@pytest.mark.parametrize("mismatch", ["page1_pdf", "review_pdf", "review_proof", "review_page1"])
+def test_selected_evidence_with_wrong_hash_binding_is_rejected_before_output(projection_inputs, mismatch):
     data = projection_inputs
-    data["reviews"][0]["proof_row_sha256"] = "0" * 64
+    if mismatch == "page1_pdf":
+        data["page1_rows"][0]["pdf_sha256"] = data["proofs"][1]["pdf_sha256"]
+        path = data["page1_path"]
+    elif mismatch == "review_pdf":
+        data["reviews"][0]["pdf_sha256"] = data["proofs"][1]["pdf_sha256"]
+        path = data["reviews_path"]
+    elif mismatch == "review_proof":
+        data["reviews"][0]["proof_row_sha256"] = "0" * 64
+        path = data["reviews_path"]
+    else:
+        data["reviews"][0]["page1_text_sha256"] = "0" * 64
+        path = data["reviews_path"]
+    _write_jsonl(path, data["page1_rows"] if mismatch == "page1_pdf" else data["reviews"])
+    data["snapshots"][path] = _sha(path.read_bytes())
+    result = _run(data, mode="pilot-subset")
+    assert result.returncode != 0
+    assert "hash" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_135_author_conflict_hold_remains_visible_in_subset_fixture(projection_inputs):
+    data = projection_inputs
+    index = TASK4_IDS.index("2026.findings-acl.135")
+    data["reviews"][index]["decision"] = "METADATA_HOLD"
+    data["reviews"][index]["reason"] = "Independent reviewer found author-order conflict."
+    data["reviews"][index]["field_verdicts"]["ordered_authors"] = "CONFLICT"
     _write_jsonl(data["reviews_path"], data["reviews"])
     data["snapshots"][data["reviews_path"]] = _sha(data["reviews_path"].read_bytes())
     result = _run(data, mode="pilot-subset")
-    assert result.returncode != 0
-    assert "proof-row hash" in result.stderr.lower()
-    assert not data["out"].exists()
+
+    assert result.returncode == 0, result.stderr
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    held = next(row for row in projection if row["item_id"] == "2026.findings-acl.135")
+    assert held["status"] == "METADATA_HOLD"
+    assert held["hold_reason"] == "Independent reviewer found author-order conflict."
+    assert len(projection) == 10
+    assert all(field["approved"] is None for field in held["fields"].values())
     _assert_inputs_unchanged(data)
 
 
