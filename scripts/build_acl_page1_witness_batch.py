@@ -228,7 +228,7 @@ def _verify_png(data: bytes, item_id: str) -> None:
     cursor = 8
     dimensions = None
     idat_parts = []
-    idat_ended = False
+    seen_phys = False
     for chunk_number in range(10_000):
         if cursor + 12 > len(data):
             raise ValueError(f"{item_id}: truncated PNG chunk or missing IEND")
@@ -252,19 +252,18 @@ def _verify_png(data: bytes, item_id: str) -> None:
             dimensions = (width, height)
         elif kind == b"IHDR":
             raise ValueError(f"{item_id}: duplicate PNG IHDR")
+        elif kind == b"pHYs":
+            if seen_phys or idat_parts or length != 9:
+                raise ValueError(f"{item_id}: invalid PNG pHYs placement or length")
+            seen_phys = True
         elif kind == b"IDAT":
-            if idat_ended:
-                raise ValueError(f"{item_id}: nonconsecutive PNG IDAT chunks")
             idat_parts.append(payload)
         elif kind == b"IEND":
             if length != 0 or not idat_parts or end != len(data):
                 raise ValueError(f"{item_id}: invalid PNG IEND or trailing data")
             break
         else:
-            if idat_parts:
-                idat_ended = True
-            if kind[0] & 0x20 == 0 and kind != b"PLTE":
-                raise ValueError(f"{item_id}: unsupported critical PNG chunk")
+            raise ValueError(f"{item_id}: unsupported PNG chunk")
         cursor = end
     else:
         raise ValueError(f"{item_id}: too many PNG chunks or missing IEND")

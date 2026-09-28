@@ -189,8 +189,14 @@ def test_receipt_hash_closes_upstream_priority_and_proof_receipts(builder, tmp_p
     minimal_png()[:-1] + bytes([minimal_png()[-1] ^ 1]),
     minimal_png() + b"trailing bytes",
     minimal_png(raw_scanline=b"\x05\x00\x00\x00"),
+    minimal_png()[:-12] + png_chunk(b"PLTE", b"\x00\x00\x00") + minimal_png()[-12:],
+    minimal_png()[:33] + png_chunk(b"PLTE", b"\x00\x00\x00") + minimal_png()[33:],
+    minimal_png()[:-12] + png_chunk(b"pHYs", struct.pack(">IIB", 4724, 4724, 1)) + minimal_png()[-12:],
+    minimal_png()[:33] + 2 * png_chunk(b"pHYs", struct.pack(">IIB", 4724, 4724, 1)) + minimal_png()[33:],
+    minimal_png()[:33] + png_chunk(b"tEXt", b"key\x00value") + minimal_png()[33:],
 ], ids=["wrong-signature", "missing-ihdr", "wrong-ihdr-length", "zero-width", "wrong-ihdr-crc",
-        "truncated-after-ihdr", "invalid-idat-zlib", "wrong-iend-crc", "trailing-data", "invalid-filter"])
+        "truncated-after-ihdr", "invalid-idat-zlib", "wrong-iend-crc", "trailing-data", "invalid-filter",
+        "late-plte", "early-plte", "late-phys", "duplicate-phys", "unknown-ancillary"])
 def test_renderer_success_with_invalid_png_has_no_success_receipt(builder, tmp_path, monkeypatch, payload):
     monkeypatch.setattr(builder, "_version", lambda executable, name: f"{name} version test")
 
@@ -204,6 +210,12 @@ def test_renderer_success_with_invalid_png_has_no_success_receipt(builder, tmp_p
     with pytest.raises(ValueError, match="PNG"):
         builder.build(args(tmp_path))
     assert not (tmp_path / "batch5" / "receipt.json").exists()
+
+
+def test_poppler_style_phys_before_idat_is_accepted(builder):
+    plain = minimal_png()
+    with_phys = plain[:33] + png_chunk(b"pHYs", struct.pack(">IIB", 4724, 4724, 1)) + plain[33:]
+    builder._verify_png(with_phys, "synthetic-valid")
 
 
 def test_mid_build_pdf_drift_leaves_no_success_receipt(builder, tmp_path, monkeypatch):
