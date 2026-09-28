@@ -1,9 +1,14 @@
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +16,23 @@ import pytest
 WORKTREE = Path(__file__).resolve().parents[1]
 PYTHON = Path(r"F:\LLM_Evoke\idea_factory\.venv\Scripts\python.exe")
 CLI = WORKTREE / "scripts" / "build_acl_metadata_projection.py"
+_SPEC = importlib.util.spec_from_file_location("acl_metadata_projection_cli", CLI)
+BUILDER = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = BUILDER
+_SPEC.loader.exec_module(BUILDER)
+_PRODUCTION_PARENT_PINS = (
+    BUILDER._PARENT_RECEIPT_RELATIVE_PATH.as_posix(),
+    BUILDER._PARENT_RECEIPT_SHA256,
+    BUILDER._PARENT_PROOF_RELATIVE_PATH.as_posix(),
+    BUILDER._PARENT_PROOF_SHA256,
+)
+
+TASK4_IDS = [
+    "2026.findings-acl.1077", "2026.findings-acl.1105", "2026.findings-acl.1174",
+    "2026.findings-acl.1266", "2026.findings-acl.1320", "2026.findings-acl.135",
+    "2026.findings-acl.1371", "2026.findings-acl.1388", "2026.findings-acl.1412",
+    "2026.findings-acl.1530",
+]
 
 
 def _sha(data: bytes) -> str:
@@ -79,100 +101,90 @@ def _write_jsonl(path: Path, rows) -> bytes:
     return data
 
 
-def _make_source(root: Path, item_id: str, index: int):
-    source_dir = root / "sources"
-    source_dir.mkdir(exist_ok=True)
-    queue_path = source_dir / f"queue-{index}.jsonl"
-    queue_row = {"item_id": item_id, "expected_title": "bib"}
-    queue_bytes = _write_jsonl(queue_path, [queue_row])
-    manifest_path = source_dir / f"manifest-{index}.jsonl"
-    manifest_bytes = _write_jsonl(manifest_path, [{"item_id": item_id, "title": "bib"}])
-    html_path = source_dir / f"official-{index}.html"
-    html_path.write_bytes(f"<html><body>{item_id}</body></html>".encode())
-    pdf_path = source_dir / f"{item_id}.pdf"
-    pdf_path.write_bytes(_minimal_pdf(index))
-    extracted_page1, pdftotext_version = _extract_page1(pdf_path)
-    cache_receipt = source_dir / f"{item_id}.receipt.json"
-    cache_receipt.write_bytes(b'{"text_sha256":"dummy"}')
-    cache_text = source_dir / f"{item_id}.txt"
-    cache_text.write_bytes(b"cached source text")
-    proof = {
-        "item_id": item_id,
-        "queue_path": str(queue_path),
-        "queue_file_sha256": _sha(queue_bytes),
-        "queue_line_number": 1,
-        "queue_raw_line_sha256": _sha(queue_bytes.splitlines(keepends=True)[0]),
-        "manifest_path": str(manifest_path),
-        "manifest_file_sha256": _sha(manifest_bytes),
-        "manifest_line_number": 1,
-        "manifest_raw_line_sha256": _sha(manifest_bytes.splitlines(keepends=True)[0]),
-        "official_html_path": str(html_path),
-        "official_html_sha256": _sha(html_path.read_bytes()),
-        "pdf_path": str(pdf_path),
-        "pdf_sha256": _sha(pdf_path.read_bytes()),
-        "cache_receipt_path": str(cache_receipt),
-        "cache_receipt_sha256": _sha(cache_receipt.read_bytes()),
-        "cache_text_path": str(cache_text),
-        "cache_text_sha256": _sha(cache_text.read_bytes()),
-        "current_expected_title": "bib",
-        "current_source_title": "bib",
-        "official_html_witness": {
-            "outcome": "UNIQUE_WITNESS",
-            "title": f"Paper {index}: Exact ACL Title",
-            "authors": [f"Author {index} A", f"Author {index} B"],
-            "publication_section_witness": {
-                "text": "Findings of the Association for Computational Linguistics: ACL 2026",
-                "year": 2026,
-            },
-        },
-        "outcome": "UNIQUE_WITNESS",
-        "overlay_is_approval": False,
-        "source_status_mutation": False,
-    }
-    page1_text = extracted_page1.decode("utf-8")
-    page1 = {
-        "item_id": item_id,
-        "pdf_sha256": proof["pdf_sha256"],
-        "page1_text_sha256": _sha(extracted_page1),
-        "page1_text": page1_text,
-        "pdftotext_version": pdftotext_version,
-        "witness_author_id": f"builder-{index}",
-    }
-    review = {
-        "item_id": item_id,
-        "proof_row_sha256": _sha(_json_bytes(proof)),
-        "pdf_sha256": proof["pdf_sha256"],
-        "page1_text_sha256": page1["page1_text_sha256"],
-        "decision": "SUPPORTED",
-        "reviewer_id": f"reviewer-{index}",
-        "reviewed_at_utc": "2026-09-28T01:02:03Z",
-        "reason": "Independent native page-1 identity confirmed.",
-        "native_pdf_identity_verified": True,
-        "field_verdicts": {"title": "PASS", "ordered_authors": "PASS", "venue": "PASS", "year": "PASS"},
-    }
-    return proof, page1, review, [queue_path, manifest_path, html_path, pdf_path, cache_receipt, cache_text]
-
-
 @pytest.fixture
 def projection_inputs(tmp_path):
     root = tmp_path / "corpus"
     root.mkdir()
-    ids = [f"2026.findings-acl.{n}" for n in (1001, 1002, 1003)]
-    built = [_make_source(root, item_id, i + 1) for i, item_id in enumerate(ids)]
-    proofs = [row[0] for row in built]
-    page1_rows = [row[1] for row in built]
-    reviews = [row[2] for row in built]
+    ids = TASK4_IDS + [f"2026.findings-acl.{9000 + i}" for i in range(660)]
+    source_dir = root / "sources"
+    source_dir.mkdir()
+    queue_path = source_dir / "queue.jsonl"
+    manifest_path = source_dir / "manifest.jsonl"
+    queue_rows = [{"item_id": item_id, "expected_title": "bib"} for item_id in ids]
+    manifest_rows = [{"item_id": item_id, "title": "bib"} for item_id in ids]
+    queue_data = _write_jsonl(queue_path, queue_rows)
+    manifest_data = _write_jsonl(manifest_path, manifest_rows)
+    html_path = source_dir / "official.html"
+    html_path.write_bytes(b"<html><body>official ACL witness fixture</body></html>")
+    pdf_paths = []
+    extracted_pages = []
+    pdftotext_version = None
+    for index in range(1, 11):
+        pdf_path = source_dir / f"selected-{index}.pdf"
+        pdf_path.write_bytes(_minimal_pdf(index))
+        extracted_page, pdftotext_version = _extract_page1(pdf_path)
+        pdf_paths.append(pdf_path)
+        extracted_pages.append(extracted_page)
+    extra_pdf_path = source_dir / "unselected.pdf"
+    extra_pdf_path.write_bytes(_minimal_pdf(1))
+    cache_receipt = source_dir / "cache.receipt.json"
+    cache_receipt.write_bytes(b'{"text_sha256":"fixture"}')
+    cache_text = source_dir / "cache.txt"
+    cache_text.write_bytes(b"cached source text")
+    proofs = []
+    for index, item_id in enumerate(ids, 1):
+        proofs.append({
+            "item_id": item_id,
+            "queue_path": str(queue_path), "queue_file_sha256": _sha(queue_data),
+            "queue_line_number": index,
+            "queue_raw_line_sha256": _sha(queue_data.splitlines(keepends=True)[index - 1]),
+            "manifest_path": str(manifest_path), "manifest_file_sha256": _sha(manifest_data),
+            "manifest_line_number": index,
+            "manifest_raw_line_sha256": _sha(manifest_data.splitlines(keepends=True)[index - 1]),
+            "official_html_path": str(html_path), "official_html_sha256": _sha(html_path.read_bytes()),
+            "pdf_path": str(pdf_paths[index - 1] if index <= 10 else extra_pdf_path),
+            "pdf_sha256": _sha((pdf_paths[index - 1] if index <= 10 else extra_pdf_path).read_bytes()),
+            "cache_receipt_path": str(cache_receipt), "cache_receipt_sha256": _sha(cache_receipt.read_bytes()),
+            "cache_text_path": str(cache_text), "cache_text_sha256": _sha(cache_text.read_bytes()),
+            "current_expected_title": "bib", "current_source_title": "bib",
+            "official_html_witness": {
+                "outcome": "UNIQUE_WITNESS", "title": "Paper 1: Exact ACL Title",
+                "authors": ["Author 1 A", "Author 1 B"],
+                "publication_section_witness": {
+                    "text": "Findings of the Association for Computational Linguistics: ACL 2026", "year": 2026,
+                },
+            },
+            "outcome": "UNIQUE_WITNESS", "overlay_is_approval": False, "source_status_mutation": False,
+        })
+    page1_rows = []
+    reviews = []
+    for index, proof in enumerate(proofs[:10], 1):
+        page1_text = extracted_pages[index - 1].decode("utf-8")
+        page1 = {
+            "item_id": proof["item_id"], "pdf_sha256": proof["pdf_sha256"],
+            "page1_text_sha256": _sha(extracted_pages[index - 1]), "page1_text": page1_text,
+            "pdftotext_version": pdftotext_version, "witness_author_id": f"builder-{index}",
+        }
+        page1_rows.append(page1)
+        reviews.append({
+            "item_id": proof["item_id"], "proof_row_sha256": _sha(_json_bytes(proof)),
+            "pdf_sha256": proof["pdf_sha256"], "page1_text_sha256": page1["page1_text_sha256"],
+            "decision": "SUPPORTED", "reviewer_id": f"reviewer-{index}",
+            "reviewed_at_utc": "2026-09-28T01:02:03Z", "reason": "Independent native page-1 identity confirmed.",
+            "native_pdf_identity_verified": True,
+            "field_verdicts": {"title": "PASS", "ordered_authors": "PASS", "venue": "PASS", "year": "PASS"},
+        })
     proof_path = root / "proof.jsonl"
     proof_data = _write_jsonl(proof_path, proofs)
     proof_receipt_path = root / "proof-receipt.json"
     proof_receipt = {
         "schema_version": "acl670_metadata_proof_only_run_receipt.v1",
-        "scope": "3 frozen ACL Findings queue rows with expected_title and source_record.title equal to bib",
+        "scope": "670 frozen ACL Findings queue rows with expected_title and source_record.title equal to bib",
         "final_proof_only_run": {
             "rows_path": str(proof_path),
             "rows_sha256": _sha(proof_data),
-            "row_count": 3,
-            "unique_item_ids": 3,
+        "row_count": 670,
+        "unique_item_ids": 670,
         },
     }
     proof_receipt_data = _json_bytes(proof_receipt)
@@ -181,10 +193,17 @@ def projection_inputs(tmp_path):
     page1_data = _write_jsonl(page1_path, page1_rows)
     reviews_path = root / "reviews.jsonl"
     reviews_data = _write_jsonl(reviews_path, reviews)
+    selection_path = root / "frozen_real_item_ids.v1.txt"
+    selection_path.write_text("".join(item_id + "\n" for item_id in TASK4_IDS), encoding="utf-8", newline="")
     input_paths = [proof_path, proof_receipt_path, page1_path, reviews_path]
-    input_paths += [path for row in built for path in row[3]]
+    input_paths += [queue_path, manifest_path, html_path, *pdf_paths, extra_pdf_path, cache_receipt, cache_text, selection_path]
     snapshots = {path: _sha(path.read_bytes()) for path in input_paths}
     out = root / "runs" / "projection-1"
+    BUILDER._PARENT_RECEIPT_RELATIVE_PATH = Path("proof-receipt.json")
+    BUILDER._PARENT_RECEIPT_SHA256 = _sha(proof_receipt_data)
+    BUILDER._PARENT_PROOF_RELATIVE_PATH = Path("proof.jsonl")
+    BUILDER._PARENT_PROOF_SHA256 = _sha(proof_data)
+    BUILDER._FROZEN_SUBSET_IDS = tuple(TASK4_IDS)
     return {
         "root": root,
         "ids": ids,
@@ -195,20 +214,22 @@ def projection_inputs(tmp_path):
         "proof_receipt_path": proof_receipt_path,
         "page1_path": page1_path,
         "reviews_path": reviews_path,
+        "selection_path": selection_path,
         "out": out,
         "snapshots": snapshots,
     }
 
 
-def _args(data, *, out=None, proof_sha=None, expected_count=3):
+def _args(data, *, out=None, proof_sha=None, mode="full", selection_path=None, selection_sha=None,
+          proof_receipt_path=None, expected_count=None):
     proof_bytes = data["proof_path"].read_bytes()
     page1_bytes = data["page1_path"].read_bytes()
     reviews_bytes = data["reviews_path"].read_bytes()
     receipt_bytes = data["proof_receipt_path"].read_bytes()
-    return [
+    args = [
         "--proof", str(data["proof_path"]),
         "--proof-sha256", proof_sha or _sha(proof_bytes),
-        "--proof-receipt", str(data["proof_receipt_path"]),
+        "--proof-receipt", str(proof_receipt_path or data["proof_receipt_path"]),
         "--proof-receipt-sha256", _sha(receipt_bytes),
         "--page1-witnesses", str(data["page1_path"]),
         "--page1-sha256", _sha(page1_bytes),
@@ -216,22 +237,39 @@ def _args(data, *, out=None, proof_sha=None, expected_count=3):
         "--reviews-sha256", _sha(reviews_bytes),
         "--corpus-root", str(data["root"]),
         "--output-dir", str(out or data["out"]),
-        "--expected-count", str(expected_count),
+        "--mode", mode,
     ]
+    if mode == "pilot-subset":
+        selection_bytes = Path(selection_path or data["selection_path"]).read_bytes()
+        args += ["--selection-list", str(selection_path or data["selection_path"]),
+                 "--selection-sha256", selection_sha or _sha(selection_bytes)]
+    if expected_count is not None:
+        args += ["--expected-count", str(expected_count)]
+    return args
+
+
+def _repin_test_parent(data):
+    BUILDER._PARENT_PROOF_SHA256 = _sha(data["proof_path"].read_bytes())
+    BUILDER._PARENT_RECEIPT_SHA256 = _sha(data["proof_receipt_path"].read_bytes())
 
 
 def _run(data, **kwargs):
+    stdout, stderr = StringIO(), StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        try:
+            code = BUILDER.main(_args(data, **kwargs))
+        except SystemExit as exc:
+            code = int(exc.code or 0)
+    return SimpleNamespace(returncode=code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
+
+
+def _run_public_cli(data, **kwargs):
     env = os.environ.copy()
     src = str(WORKTREE / "src")
     env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     return subprocess.run(
         [str(PYTHON), "-X", "utf8", str(CLI), *_args(data, **kwargs)],
-        cwd=WORKTREE,
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        cwd=WORKTREE, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
 
 
@@ -252,8 +290,10 @@ def test_projection_conserves_every_source_row_and_holds_missing_review(projecti
     assert result.returncode == 0, result.stderr
     projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
     diagnostic = [json.loads(line) for line in (data["out"] / "acl_metadata_witness.v1.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert len(projection) == len(diagnostic) == 3
-    assert len({row["item_id"] for row in projection}) == 3
+    assert [row["item_id"] for row in projection] == sorted(data["ids"])
+    assert [row["item_id"] for row in diagnostic] == sorted(data["ids"])
+    assert len(projection) == len(diagnostic) == 670
+    assert len({row["item_id"] for row in projection}) == 670
     assert {row["status"] for row in projection} == {"SUPPORTED", "METADATA_HOLD"}
     assert all(row["review_authentication"] == "EXTERNAL_QA_REQUIRED" for row in projection)
     assert all(row["downstream_card_use_approved"] is False for row in projection)
@@ -263,7 +303,10 @@ def test_projection_conserves_every_source_row_and_holds_missing_review(projecti
     assert held["status"] == "METADATA_HOLD"
     assert all(field["approved"] is None for field in held["fields"].values())
     receipt = json.loads((data["out"] / "receipt.json").read_text(encoding="utf-8"))
-    assert receipt["counts"] == {"SUPPORTED": 1, "METADATA_HOLD": 2}
+    assert receipt["counts"] == {"SUPPORTED": 1, "METADATA_HOLD": 669}
+    assert receipt["run_mode"] == "FULL"
+    assert receipt["parent_row_count"] == 670
+    assert receipt["output_row_count"] == 670
     assert receipt["source_admission_approved"] is False
     assert receipt["human_approved"] is False
     assert receipt["graph_ingested"] is False
@@ -271,6 +314,211 @@ def test_projection_conserves_every_source_row_and_holds_missing_review(projecti
     assert receipt["downstream_card_use_approved"] is False
     assert receipt["toolchain"]["pdftotext_version"].startswith("pdftotext version ")
     assert len(receipt["toolchain"]["pdftotext_sha256"]) == 64
+    _assert_inputs_unchanged(data)
+
+
+def test_ten_id_subset_conserves_nine_supported_and_one_missing_review(projection_inputs):
+    data = projection_inputs
+    data["reviews"] = data["reviews"][:9]
+    _write_jsonl(data["reviews_path"], data["reviews"])
+    data["snapshots"][data["reviews_path"]] = _sha(data["reviews_path"].read_bytes())
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode == 0, result.stderr
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    diagnostic = [json.loads(line) for line in (data["out"] / "acl_metadata_witness.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    expected_ids = sorted(TASK4_IDS)
+    assert [row["item_id"] for row in projection] == expected_ids
+    assert [row["item_id"] for row in diagnostic] == expected_ids
+    assert {row["status"] for row in projection} == {"SUPPORTED", "METADATA_HOLD"}
+    assert sum(row["status"] == "SUPPORTED" for row in projection) == 9
+    assert sum(row["status"] == "METADATA_HOLD" for row in projection) == 1
+    held_id = TASK4_IDS[9]
+    assert next(row for row in projection if row["item_id"] == held_id)["hold_reason"] == "REVIEW_MISSING"
+    receipt = json.loads((data["out"] / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["run_mode"] == "PILOT_SUBSET"
+    assert receipt["parent_row_count"] == 670
+    assert receipt["selected_row_count"] == receipt["output_row_count"] == 10
+    assert receipt["selected_ids"] == expected_ids
+    assert receipt["selection_list_sha256"] == _sha(data["selection_path"].read_bytes())
+    assert receipt["source_admission_approved"] is False
+    assert receipt["human_approved"] is False
+    assert receipt["graph_ingested"] is False
+    assert receipt["downstream_card_use_approved"] is False
+    _assert_inputs_unchanged(data)
+
+
+@pytest.mark.parametrize("mutation, message", [
+    ("wrong", "frozen"),
+    ("duplicate", "duplicate"),
+    ("missing", "ten"),
+    ("additional", "ten"),
+    ("noncanonical", "canonical"),
+    ("test_only", "canonical"),
+])
+def test_invalid_selection_ids_fail_before_output_and_preserve_inputs(projection_inputs, mutation, message):
+    data = projection_inputs
+    ids = list(TASK4_IDS)
+    if mutation == "wrong":
+        ids[-1] = "2026.findings-acl.999999"
+    elif mutation == "duplicate":
+        ids[-1] = ids[0]
+    elif mutation == "missing":
+        ids.pop()
+    elif mutation == "additional":
+        ids.append("2026.findings-acl.999999")
+    elif mutation == "noncanonical":
+        ids[-1] = "2026.findings-acl.01320"
+    else:
+        ids[-1] = "2026.findings-acl.TEST_ONLY"
+    data["selection_path"].write_text("".join(item_id + "\n" for item_id in ids), encoding="utf-8", newline="")
+    data["snapshots"][data["selection_path"]] = _sha(data["selection_path"].read_bytes())
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode != 0
+    assert message in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_selection_list_outside_root_is_rejected_without_output(projection_inputs, tmp_path):
+    data = projection_inputs
+    outside = tmp_path / "outside.txt"
+    outside.write_text("".join(item_id + "\n" for item_id in TASK4_IDS), encoding="utf-8")
+    result = _run(data, mode="pilot-subset", selection_path=outside)
+    assert result.returncode != 0
+    assert "inside" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_selection_list_reparse_path_is_rejected_without_output(projection_inputs):
+    data = projection_inputs
+    alias = data["root"] / "selection-alias.txt"
+    try:
+        alias.symlink_to(data["selection_path"])
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    result = _run(data, mode="pilot-subset", selection_path=alias)
+    assert result.returncode != 0
+    assert "reparse" in result.stderr.lower() or "symlink" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+@pytest.mark.parametrize("case", ["wrong_hash", "wrong_count", "ten_rows"])
+def test_forged_or_cropped_parent_receipt_is_rejected_before_output(projection_inputs, case):
+    data = projection_inputs
+    receipt = json.loads(data["proof_receipt_path"].read_text(encoding="utf-8"))
+    if case == "wrong_hash":
+        receipt["final_proof_only_run"]["rows_sha256"] = "0" * 64
+    elif case == "wrong_count":
+        receipt["final_proof_only_run"]["row_count"] = 10
+        receipt["final_proof_only_run"]["unique_item_ids"] = 10
+    else:
+        proof_bytes = _write_jsonl(data["proof_path"], data["proofs"][:10])
+        receipt["final_proof_only_run"].update({"rows_sha256": _sha(proof_bytes), "row_count": 10, "unique_item_ids": 10})
+        receipt["scope"] = "10 frozen ACL Findings queue rows with expected_title and source_record.title equal to bib"
+        data["snapshots"][data["proof_path"]] = _sha(proof_bytes)
+    data["proof_receipt_path"].write_bytes(_json_bytes(receipt))
+    data["snapshots"][data["proof_receipt_path"]] = _sha(data["proof_receipt_path"].read_bytes())
+    _repin_test_parent(data)
+    result = _run(data)
+    assert result.returncode != 0
+    assert "receipt" in result.stderr.lower() or "670" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_selected_id_must_exist_in_parent_even_when_parent_has_670_unique_rows(projection_inputs):
+    data = projection_inputs
+    data["proofs"][0]["item_id"] = "2026.findings-acl.999998"
+    proof_bytes = _write_jsonl(data["proof_path"], data["proofs"])
+    receipt = json.loads(data["proof_receipt_path"].read_text(encoding="utf-8"))
+    receipt["final_proof_only_run"]["rows_sha256"] = _sha(proof_bytes)
+    data["proof_receipt_path"].write_bytes(_json_bytes(receipt))
+    data["snapshots"][data["proof_path"]] = _sha(proof_bytes)
+    data["snapshots"][data["proof_receipt_path"]] = _sha(data["proof_receipt_path"].read_bytes())
+    _repin_test_parent(data)
+    result = _run(data, mode="pilot-subset")
+    assert result.returncode != 0
+    assert "absent" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_child_receipt_cannot_be_used_as_parent_receipt(projection_inputs):
+    data = projection_inputs
+    child = data["root"] / "child-receipt.json"
+    child.write_bytes(_json_bytes({"schema_version": "acl_metadata_projection_run_receipt.v1"}))
+    data["snapshots"][child] = _sha(child.read_bytes())
+    result = _run(data, proof_receipt_path=child)
+    assert result.returncode != 0
+    assert "authoritative" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+@pytest.mark.parametrize("evidence_kind", ["page1", "review"])
+def test_evidence_id_outside_parent_is_rejected_without_output(projection_inputs, evidence_kind):
+    data = projection_inputs
+    if evidence_kind == "page1":
+        rows = data["page1_rows"] + [dict(data["page1_rows"][0], item_id="2026.findings-acl.888888")]
+        path = data["page1_path"]
+    else:
+        rows = data["reviews"] + [dict(data["reviews"][0], item_id="2026.findings-acl.888888")]
+        path = data["reviews_path"]
+    _write_jsonl(path, rows)
+    data["snapshots"][path] = _sha(path.read_bytes())
+    result = _run(data, mode="pilot-subset")
+    assert result.returncode != 0
+    assert "broader than proof scope" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_review_bound_to_wrong_proof_hash_is_rejected_without_output(projection_inputs):
+    data = projection_inputs
+    data["reviews"][0]["proof_row_sha256"] = "0" * 64
+    _write_jsonl(data["reviews_path"], data["reviews"])
+    data["snapshots"][data["reviews_path"]] = _sha(data["reviews_path"].read_bytes())
+    result = _run(data, mode="pilot-subset")
+    assert result.returncode != 0
+    assert "proof-row hash" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_stale_selection_hash_is_rejected_without_output(projection_inputs):
+    data = projection_inputs
+    result = _run(data, mode="pilot-subset", selection_sha="0" * 64)
+    assert result.returncode != 0
+    assert "selection list hash mismatch" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_arbitrary_expected_count_is_not_a_production_cli_mode(projection_inputs):
+    data = projection_inputs
+    result = _run(data, expected_count=3)
+    assert result.returncode != 0
+    assert "expected-count" in result.stderr.lower()
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_production_trust_root_is_fixed_and_rejects_synthetic_parent(projection_inputs):
+    data = projection_inputs
+    assert _PRODUCTION_PARENT_PINS == (
+        "runs/parallel24-20260927-1340/engineering/ACL670_WITNESS_FINAL_RUN_RECEIPT.json",
+        "2cf9982c0f39c7d82098baaf7ed41c759b83f45fd46b61fd752c899a0a669205",
+        "runs/parallel24-20260927-1340/engineering/acl670-metadata-witness-proofonly-v5-20260927/acl_metadata_witness.jsonl",
+        "375b75a511042b5e617a69649814d4c599a9b5d6a411d8f076c13ac48796cb8a",
+    )
+    result = _run_public_cli(data)
+    assert result.returncode != 0
+    assert "authoritative frozen" in result.stderr.lower()
+    assert not data["out"].exists()
     _assert_inputs_unchanged(data)
 
 
@@ -287,6 +535,8 @@ def test_duplicate_item_ids_are_rejected_without_outputs_or_source_mutation(proj
         data["proof_receipt_path"].write_bytes(_json_bytes(receipt))
         data["snapshots"][data["proof_receipt_path"]] = _sha(data["proof_receipt_path"].read_bytes())
     data["snapshots"][data[key]] = _sha(data[key].read_bytes())
+    if duplicate_kind == "proof":
+        _repin_test_parent(data)
     result = _run(data)
 
     assert result.returncode != 0
@@ -329,6 +579,7 @@ def test_altered_queue_row_hash_is_rejected_without_success_receipt(projection_i
     data["proof_receipt_path"].write_bytes(_json_bytes(receipt))
     data["snapshots"][data["proof_path"]] = _sha(proof_bytes)
     data["snapshots"][data["proof_receipt_path"]] = _sha(data["proof_receipt_path"].read_bytes())
+    _repin_test_parent(data)
     result = _run(data)
 
     assert result.returncode != 0
@@ -351,6 +602,7 @@ def test_synthetic_unrelated_page1_text_cannot_be_supported_by_recomputed_hashes
     reviews_data = _write_jsonl(data["reviews_path"], data["reviews"])
     data["snapshots"][data["page1_path"]] = _sha(page1_data)
     data["snapshots"][data["reviews_path"]] = _sha(reviews_data)
+    _repin_test_parent(data)
     result = _run(data)
 
     assert result.returncode == 0, result.stderr
@@ -400,6 +652,7 @@ def test_non_pdf_bytes_cannot_be_supported_even_when_all_declared_hashes_are_rec
     data["snapshots"][data["proof_receipt_path"]] = _sha(data["proof_receipt_path"].read_bytes())
     data["snapshots"][data["page1_path"]] = _sha(page1_data)
     data["snapshots"][data["reviews_path"]] = _sha(reviews_data)
+    _repin_test_parent(data)
     result = _run(data)
 
     assert result.returncode == 0, result.stderr

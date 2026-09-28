@@ -22,6 +22,20 @@ _ACL_ITEM_ID_RE = re.compile(r"2026\.findings-acl\.\d+\Z")
 _FIELDS = ("title", "ordered_authors", "venue", "year")
 _RECEIPT_SCHEMA = "acl670_metadata_proof_only_run_receipt.v1"
 _REPARSE_POINT = 0x0400
+_PARENT_RECEIPT_RELATIVE_PATH = Path(
+    "runs/parallel24-20260927-1340/engineering/ACL670_WITNESS_FINAL_RUN_RECEIPT.json"
+)
+_PARENT_RECEIPT_SHA256 = "2cf9982c0f39c7d82098baaf7ed41c759b83f45fd46b61fd752c899a0a669205"
+_PARENT_PROOF_RELATIVE_PATH = Path(
+    "runs/parallel24-20260927-1340/engineering/acl670-metadata-witness-proofonly-v5-20260927/acl_metadata_witness.jsonl"
+)
+_PARENT_PROOF_SHA256 = "375b75a511042b5e617a69649814d4c599a9b5d6a411d8f076c13ac48796cb8a"
+_FROZEN_SUBSET_IDS = (
+    "2026.findings-acl.1077", "2026.findings-acl.1105", "2026.findings-acl.1174",
+    "2026.findings-acl.1266", "2026.findings-acl.1320", "2026.findings-acl.135",
+    "2026.findings-acl.1371", "2026.findings-acl.1388", "2026.findings-acl.1412",
+    "2026.findings-acl.1530",
+)
 
 
 def _sha(data: bytes) -> str:
@@ -200,6 +214,30 @@ def _verify_proof_source_rows(proof_rows: list[dict], root: Path, snapshots: dic
             raise ValueError(f"{item_id}: frozen source row is outside bib-title scope")
 
 
+def _parse_selection(data: bytes) -> tuple[str, ...]:
+    try:
+        decoded = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"selection list must be strict UTF-8: {exc}") from exc
+    if decoded.startswith("\ufeff") or any(char in decoded for char in "\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
+        raise ValueError("selection list must use plain UTF-8 with one ID per LF/CRLF line")
+    if "\r" in decoded.replace("\r\n", ""):
+        raise ValueError("selection list contains a bare carriage return")
+    ids = decoded.splitlines()
+    if len(ids) != len(_FROZEN_SUBSET_IDS) or any(not item_id for item_id in ids):
+        raise ValueError("selection list must contain exactly ten nonblank IDs, one per line")
+    for item_id in ids:
+        if not _ACL_ITEM_ID_RE.fullmatch(item_id) or str(int(item_id.rsplit(".", 1)[1])) != item_id.rsplit(".", 1)[1]:
+            raise ValueError(f"selection ID is not a canonical ACL Findings ID: {item_id!r}")
+        if "TEST_ONLY" in item_id:
+            raise ValueError("TEST_ONLY IDs are forbidden in the production selection list")
+    if len(set(ids)) != len(ids):
+        raise ValueError("selection list contains duplicate IDs")
+    if set(ids) != set(_FROZEN_SUBSET_IDS):
+        raise ValueError("selection list IDs do not equal the frozen Task 4 ten-ID set")
+    return tuple(ids)
+
+
 def _hold_fields(proof: dict) -> dict:
     witness = proof.get("official_html_witness") or {}
     section = witness.get("publication_section_witness") or {}
@@ -365,6 +403,32 @@ def build(args: argparse.Namespace) -> Path:
     page1_path = _inside(Path(args.page1_witnesses), root, "page1 witnesses")
     reviews_path = _inside(Path(args.reviews), root, "reviews")
 
+    expected_receipt_path = _inside(root / _PARENT_RECEIPT_RELATIVE_PATH, root, "authoritative parent receipt")
+    expected_proof_path = _inside(root / _PARENT_PROOF_RELATIVE_PATH, root, "authoritative parent proof")
+    if os.path.normcase(os.path.normpath(str(proof_receipt_path))) != os.path.normcase(os.path.normpath(str(expected_receipt_path))):
+        raise ValueError("proof receipt path is not the authoritative frozen 670-row parent receipt")
+    if os.path.normcase(os.path.normpath(str(proof_path))) != os.path.normcase(os.path.normpath(str(expected_proof_path))):
+        raise ValueError("proof path is not the authoritative frozen 670-row parent proof")
+    if receipt_sha != _PARENT_RECEIPT_SHA256:
+        raise ValueError("proof receipt hash differs from the authoritative frozen parent pin")
+    if proof_sha != _PARENT_PROOF_SHA256:
+        raise ValueError("proof hash differs from the authoritative frozen parent pin")
+
+    selection_ids: tuple[str, ...] | None = None
+    selection_path: Path | None = None
+    selection_sha: str | None = None
+    if args.mode == "pilot-subset":
+        if not args.selection_list or not args.selection_sha256:
+            raise ValueError("pilot-subset mode requires --selection-list and --selection-sha256")
+        selection_sha = _digest_argument(args.selection_sha256, "selection-list hash")
+        selection_path = _inside(Path(args.selection_list), root, "selection list")
+        selection_data = _read_pinned(selection_path, selection_sha, "selection list", root, snapshots)
+        selection_ids = _parse_selection(selection_data)
+    elif args.mode != "full":
+        raise ValueError("mode must be exactly full or pilot-subset")
+    elif args.selection_list is not None or args.selection_sha256 is not None:
+        raise ValueError("selection-list inputs are only valid in pilot-subset mode")
+
     proof_data = _read_pinned(proof_path, proof_sha, "proof rows", root, snapshots)
     receipt_data = _read_pinned(proof_receipt_path, receipt_sha, "proof receipt", root, snapshots)
     page1_data = _read_pinned(page1_path, page1_sha, "page1 witnesses", root, snapshots)
@@ -384,15 +448,20 @@ def build(args: argparse.Namespace) -> Path:
         raise ValueError("proof receipt does not pin the exact proof-row hash")
     proof_rows = _json_object_lines(proof_data, "proof rows")
     proof_by_id = _unique_by_item(proof_rows, "proof")
-    if len(proof_rows) != args.expected_count or len(proof_by_id) != args.expected_count:
-        raise ValueError(f"proof row conservation failed: expected exactly {args.expected_count} unique proof rows")
-    if run_receipt.get("row_count") != args.expected_count or run_receipt.get("unique_item_ids") != args.expected_count:
-        raise ValueError("proof receipt scope count does not match --expected-count")
+    if len(proof_rows) != 670 or len(proof_by_id) != 670:
+        raise ValueError("proof row conservation failed: authoritative parent must contain exactly 670 unique rows")
+    if run_receipt.get("row_count") != 670 or run_receipt.get("unique_item_ids") != 670:
+        raise ValueError("proof receipt must identify exactly 670 unique parent rows")
     scope = proof_receipt.get("scope")
-    if not isinstance(scope, str) or f"{args.expected_count} frozen ACL Findings" not in scope:
-        raise ValueError("proof receipt scope does not name the exact frozen ACL Findings row count")
-    if args.expected_count == 670 and not ("expected_title" in scope and "source_record.title" in scope and "bib" in scope):
+    if not isinstance(scope, str) or "670 frozen ACL Findings" not in scope:
+        raise ValueError("proof receipt scope does not name the exact frozen 670-row ACL Findings count")
+    if not ("expected_title" in scope and "source_record.title" in scope and "bib" in scope):
         raise ValueError("proof receipt does not identify the frozen 670-row bib-title scope")
+
+    if selection_ids is not None:
+        missing_parent_ids = set(selection_ids) - set(proof_by_id)
+        if missing_parent_ids:
+            raise ValueError(f"selected IDs are absent from the authoritative parent proof: {sorted(missing_parent_ids)}")
 
     page1_by_id = _unique_by_item(_json_object_lines(page1_data, "page1 witnesses"), "page1 witness")
     review_by_id = _unique_by_item(_json_object_lines(reviews_data, "reviews"), "review")
@@ -403,11 +472,16 @@ def build(args: argparse.Namespace) -> Path:
     if unknown_reviews:
         raise ValueError(f"reviews are broader than proof scope: {sorted(unknown_reviews)}")
 
+    if selection_ids is not None:
+        selected_proofs = {item_id: proof_by_id[item_id] for item_id in selection_ids}
+    else:
+        selected_proofs = proof_by_id
+
     _verify_proof_source_rows(proof_rows, root, snapshots)
     projection_rows: list[dict] = []
     diagnostic_rows: list[dict] = []
-    for item_id in sorted(proof_by_id):
-        proof = proof_by_id[item_id]
+    for item_id in sorted(selected_proofs):
+        proof = selected_proofs[item_id]
         page1 = page1_by_id.get(item_id)
         review = review_by_id.get(item_id)
         page1_error = (
@@ -430,9 +504,15 @@ def build(args: argparse.Namespace) -> Path:
         projection_rows.append(projected)
         diagnostic_rows.append(_diagnostic_row(proof, page1, review, projected))
 
-    if len(projection_rows) != args.expected_count or len(diagnostic_rows) != args.expected_count:
+    expected_output_count = 10 if args.mode == "pilot-subset" else 670
+    if len(projection_rows) != expected_output_count or len(diagnostic_rows) != expected_output_count:
         raise ValueError("all-row conservation failed before output")
+    expected_ids = sorted(selected_proofs)
+    if [row["item_id"] for row in projection_rows] != expected_ids or [row["item_id"] for row in diagnostic_rows] != expected_ids:
+        raise ValueError("output item IDs do not exactly conserve the selected parent set")
     _capture_snapshot_recheck(snapshots)
+    if selection_path is not None and _sha(selection_path.read_bytes()) != selection_sha:
+        raise ValueError("selection-list hash changed immediately before output")
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     _inside(output_dir.parent, root, "output parent")
@@ -459,6 +539,17 @@ def build(args: argparse.Namespace) -> Path:
     script_hash = _sha(Path(__file__).read_bytes())
     receipt = {
         "schema_version": "acl_metadata_projection_run_receipt.v1",
+        "run_mode": "PILOT_SUBSET" if args.mode == "pilot-subset" else "FULL",
+        "parent_proof_receipt_path": str(proof_receipt_path),
+        "parent_proof_receipt_sha256": receipt_sha,
+        "parent_proof_path": str(proof_path),
+        "parent_proof_sha256": proof_sha,
+        "parent_row_count": 670,
+        "selection_list_path": str(selection_path) if selection_path is not None else None,
+        "selection_list_sha256": selection_sha,
+        "selected_ids": list(sorted(selected_proofs)),
+        "selected_row_count": len(selected_proofs),
+        "output_row_count": len(projection_rows),
         "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "protocol_sha256": script_hash,
         "toolchain": {
@@ -509,15 +600,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--reviews-sha256", required=True)
     parser.add_argument("--corpus-root", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--expected-count", required=True, type=int)
+    parser.add_argument("--mode", required=True, choices=("full", "pilot-subset"))
+    parser.add_argument("--selection-list")
+    parser.add_argument("--selection-sha256")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    if args.expected_count < 1:
-        parser.error("--expected-count must be positive")
     try:
         output = build(args)
     except (OSError, ValueError, KeyError, TypeError) as exc:
