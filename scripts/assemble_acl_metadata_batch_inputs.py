@@ -167,11 +167,10 @@ def assemble(args: argparse.Namespace) -> Path:
     if output.exists():
         raise ValueError(f"output directory already exists: {output}")
     proof_sha = _digest(args.proof_sha256, "proof-sha256")
+    manifest_sha = _digest(args.manifest_sha256, "manifest-sha256")
 
     pins: dict[Path, str] = {}
-    manifest_data = manifest_path.read_bytes()
-    manifest_sha = _sha(manifest_data)
-    pins[manifest_path] = manifest_sha
+    manifest_data = _read_pinned(manifest_path, manifest_sha, "manifest", pins)
     manifest = _json_object(manifest_data, "manifest")
     if set(manifest) != {"schema_version", "witnesses", "reviews"}:
         raise ValueError("manifest has incorrect keys")
@@ -291,7 +290,7 @@ def assemble(args: argparse.Namespace) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("manifest", "proof", "proof-sha256", "corpus-root", "output-dir"):
+    for name in ("manifest", "manifest-sha256", "proof", "proof-sha256", "corpus-root", "output-dir"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--expected-batches", type=int, required=True)
     parser.add_argument("--expected-total", type=int, required=True)

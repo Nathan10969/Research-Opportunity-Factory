@@ -64,7 +64,8 @@ def _save_manifest(path, value):
 def _run(root, proof, proof_sha, manifest, output=None):
     out = output or root / "assembled"
     result = subprocess.run(
-        [sys.executable, str(CLI), "--manifest", str(manifest), "--proof", str(proof),
+        [sys.executable, str(CLI), "--manifest", str(manifest),
+         "--manifest-sha256", _sha(manifest.read_bytes()), "--proof", str(proof),
          "--proof-sha256", proof_sha, "--corpus-root", str(root), "--output-dir", str(out),
          "--expected-batches", "2", "--expected-total", "20"],
         capture_output=True, text=True,
@@ -86,6 +87,7 @@ def test_assembles_raw_lines_in_batch_order_and_writes_nonapproval_receipt(tmp_p
         Path(row["path"]).read_bytes() for row in value["reviews"]
     )
     receipt = json.loads((out / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["inputs"]["manifest"] == {"path": str(manifest), "sha256": _sha(before[manifest])}
     assert receipt["counts"]["witness_rows"] == 20
     assert receipt["counts"]["review_rows"] == 2
     assert receipt["proof_id_set_covered"] is True
@@ -98,6 +100,58 @@ def test_assembles_raw_lines_in_batch_order_and_writes_nonapproval_receipt(tmp_p
         data = (out / name).read_bytes()
         assert receipt["outputs"][name] == {"sha256": _sha(data), "bytes": len(data)}
     assert all(path.read_bytes() == data for path, data in before.items())
+
+
+def test_swapped_but_valid_manifest_fails_its_external_pin(tmp_path):
+    root, proof, proof_sha, manifest, value, sources, _ = _fixture(tmp_path)
+    frozen_manifest_sha = _sha(manifest.read_bytes())
+    value["reviews"] = []  # Still a valid assembly manifest, but not the frozen one.
+    _save_manifest(manifest, value)
+    before = {path: path.read_bytes() for path in sources}
+    output = root / "assembled"
+    spec = importlib.util.spec_from_file_location("acl_batch_assembler_for_manifest_pin", CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    args = Namespace(manifest=str(manifest), manifest_sha256=frozen_manifest_sha,
+                     proof=str(proof), proof_sha256=proof_sha, corpus_root=str(root),
+                     output_dir=str(output), expected_batches=2, expected_total=20)
+
+    with pytest.raises(ValueError, match="manifest hash mismatch"):
+        module.assemble(args)
+
+    assert not output.exists()
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+def test_cli_requires_manifest_sha256(tmp_path):
+    root, proof, proof_sha, manifest, _, _, _ = _fixture(tmp_path)
+    output = root / "assembled"
+    result = subprocess.run(
+        [sys.executable, str(CLI), "--manifest", str(manifest), "--proof", str(proof),
+         "--proof-sha256", proof_sha, "--corpus-root", str(root),
+         "--output-dir", str(output), "--expected-batches", "2", "--expected-total", "20"],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    assert "--manifest-sha256" in result.stderr
+    assert not output.exists()
+
+
+def test_malformed_manifest_sha256_is_rejected_before_output(tmp_path):
+    root, proof, proof_sha, manifest, _, _, _ = _fixture(tmp_path)
+    output = root / "assembled"
+    spec = importlib.util.spec_from_file_location("acl_batch_assembler_for_bad_manifest_pin", CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    args = Namespace(manifest=str(manifest), manifest_sha256="ABC",
+                     proof=str(proof), proof_sha256=proof_sha, corpus_root=str(root),
+                     output_dir=str(output), expected_batches=2, expected_total=20)
+
+    with pytest.raises(ValueError, match="manifest-sha256 must be a lowercase SHA-256 hash"):
+        module.assemble(args)
+
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("failure", ["write", "close"])
@@ -138,7 +192,8 @@ def test_receipt_io_failure_never_publishes_success_receipt(tmp_path, monkeypatc
         return real
 
     monkeypatch.setattr(Path, "open", open_with_fault)
-    args = Namespace(manifest=str(manifest), proof=str(proof), proof_sha256=proof_sha,
+    args = Namespace(manifest=str(manifest), manifest_sha256=_sha(manifest.read_bytes()),
+                     proof=str(proof), proof_sha256=proof_sha,
                      corpus_root=str(root), output_dir=str(output), expected_batches=2,
                      expected_total=20)
 
@@ -179,7 +234,8 @@ def test_short_output_write_never_publishes_receipt(tmp_path, monkeypatch, outpu
         return ShortWriter(real) if path.name == output_name and mode == "xb" else real
 
     monkeypatch.setattr(Path, "open", open_with_short_write)
-    args = Namespace(manifest=str(manifest), proof=str(proof), proof_sha256=proof_sha,
+    args = Namespace(manifest=str(manifest), manifest_sha256=_sha(manifest.read_bytes()),
+                     proof=str(proof), proof_sha256=proof_sha,
                      corpus_root=str(root), output_dir=str(output), expected_batches=2,
                      expected_total=20)
 
@@ -210,7 +266,8 @@ def test_output_readback_failure_never_publishes_receipt(tmp_path, monkeypatch, 
         return data
 
     monkeypatch.setattr(Path, "read_bytes", read_with_fault)
-    args = Namespace(manifest=str(manifest), proof=str(proof), proof_sha256=proof_sha,
+    args = Namespace(manifest=str(manifest), manifest_sha256=_sha(manifest.read_bytes()),
+                     proof=str(proof), proof_sha256=proof_sha,
                      corpus_root=str(root), output_dir=str(output), expected_batches=2,
                      expected_total=20)
 
