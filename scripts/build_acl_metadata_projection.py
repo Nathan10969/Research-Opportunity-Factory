@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,6 +280,67 @@ def _capture_snapshot_recheck(snapshots: dict[Path, str]) -> None:
             raise ValueError(f"pinned input drift before output: {path}")
 
 
+def _resolve_pdftotext(snapshots: dict[Path, str]) -> tuple[Path, str, str]:
+    found = shutil.which("pdftotext")
+    if not found:
+        raise ValueError("pdftotext executable is required to verify native page-1 evidence")
+    candidate = Path(found)
+    _reject_reparse_components(candidate)
+    try:
+        executable = candidate.resolve(strict=True)
+        executable_bytes = executable.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot pin pdftotext executable: {exc}") from exc
+    if not executable.is_file():
+        raise ValueError("resolved pdftotext executable is not a regular file")
+    _reject_reparse_components(executable)
+    executable_sha256 = _sha(executable_bytes)
+    snapshots[executable] = executable_sha256
+    try:
+        result = subprocess.run(
+            [str(executable), "-v"], capture_output=True, check=False, timeout=30
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"cannot obtain pdftotext version: {exc}") from exc
+    version_output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+    version_lines = [line.strip() for line in version_output.splitlines() if line.strip()]
+    if result.returncode != 0 or not version_lines or not version_lines[0].startswith("pdftotext version "):
+        raise ValueError("resolved pdftotext executable did not report a usable version")
+    return executable, executable_sha256, version_lines[0]
+
+
+def _page1_verification_hold_reason(
+    proof: dict,
+    page1: dict,
+    executable: Path,
+    executable_version: str,
+) -> str | None:
+    if page1.get("pdf_sha256") != proof.get("pdf_sha256"):
+        return "PAGE1_PDF_HASH_MISMATCH"
+    if page1.get("pdftotext_version") != executable_version:
+        return "PDFTOTEXT_VERSION_MISMATCH"
+    page1_text = page1.get("page1_text")
+    if not isinstance(page1_text, str):
+        return "PAGE1_TEXT_INVALID"
+    page1_bytes = page1_text.encode("utf-8")
+    if page1.get("page1_text_sha256") != _sha(page1_bytes):
+        return "PAGE1_TEXT_HASH_MISMATCH"
+    try:
+        result = subprocess.run(
+            [str(executable), "-f", "1", "-l", "1", "-layout", proof["pdf_path"], "-"],
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "PAGE1_EXTRACTION_FAILED"
+    if result.returncode != 0:
+        return "PAGE1_EXTRACTION_FAILED"
+    if result.stdout != page1_bytes or _sha(result.stdout) != page1.get("page1_text_sha256"):
+        return "PAGE1_EXTRACTION_MISMATCH"
+    return None
+
+
 def build(args: argparse.Namespace) -> Path:
     root = Path(os.path.abspath(args.corpus_root))
     if not root.is_dir():
@@ -292,6 +355,7 @@ def build(args: argparse.Namespace) -> Path:
         raise ValueError(f"output directory already exists; exclusive creation refused: {output_dir}")
 
     snapshots: dict[Path, str] = {}
+    pdftotext_path, pdftotext_sha256, pdftotext_version = _resolve_pdftotext(snapshots)
     proof_sha = _digest_argument(args.proof_sha256, "proof hash")
     receipt_sha = _digest_argument(args.proof_receipt_sha256, "proof receipt hash")
     page1_sha = _digest_argument(args.page1_sha256, "page1 witnesses hash")
@@ -346,14 +410,23 @@ def build(args: argparse.Namespace) -> Path:
         proof = proof_by_id[item_id]
         page1 = page1_by_id.get(item_id)
         review = review_by_id.get(item_id)
+        page1_error = (
+            _page1_verification_hold_reason(proof, page1, pdftotext_path, pdftotext_version)
+            if page1 is not None
+            else None
+        )
         if page1 is None:
             projected = _hold_row(proof, "PAGE1_WITNESS_MISSING", review=review)
+        elif page1_error is not None:
+            projected = _hold_row(proof, page1_error, page1=page1, review=review)
         elif review is None:
             projected = _hold_row(proof, "REVIEW_MISSING", page1=page1)
         else:
             # A stale or malformed reviewer record is an input error, never a projection.
             projected = validate_admission(proof, page1, review)
             projected["page1_witness_sha256"] = _canonical_sha(page1)
+        projected["review_authentication"] = "EXTERNAL_QA_REQUIRED"
+        projected["downstream_card_use_approved"] = False
         projection_rows.append(projected)
         diagnostic_rows.append(_diagnostic_row(proof, page1, review, projected))
 
@@ -388,6 +461,11 @@ def build(args: argparse.Namespace) -> Path:
         "schema_version": "acl_metadata_projection_run_receipt.v1",
         "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "protocol_sha256": script_hash,
+        "toolchain": {
+            "pdftotext_path": str(pdftotext_path),
+            "pdftotext_sha256": pdftotext_sha256,
+            "pdftotext_version": pdftotext_version,
+        },
         "input_sha256": {
             "proof_rows": proof_sha,
             "proof_receipt": receipt_sha,
@@ -407,6 +485,8 @@ def build(args: argparse.Namespace) -> Path:
         "source_admission_approved": False,
         "human_approved": False,
         "graph_ingested": False,
+        "review_authentication": "EXTERNAL_QA_REQUIRED",
+        "downstream_card_use_approved": False,
     }
     receipt_path = output_dir / "receipt.json"
     receipt_bytes = json.dumps(receipt, sort_keys=True, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"

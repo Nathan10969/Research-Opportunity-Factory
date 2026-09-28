@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,58 @@ def _json_bytes(value) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _pdftotext_path() -> str:
+    executable = shutil.which("pdftotext")
+    if executable is None:
+        pytest.skip("pdftotext is required for native-page projection tests")
+    return executable
+
+
+def _minimal_pdf(index: int) -> bytes:
+    stream = (
+        "BT\n/F1 12 Tf\n72 720 Td\n"
+        f"(Paper {index}: Exact ACL Title) Tj\n0 -20 Td\n"
+        f"(Author {index} A; Author {index} B) Tj\n0 -20 Td\n"
+        "(ACL 2026) Tj\nET\n"
+    ).encode("ascii")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"endstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{number} 0 obj\n".encode("ascii"))
+        pdf.extend(body)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode("ascii"))
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(pdf)
+
+
+def _extract_page1(pdf_path: Path) -> tuple[bytes, str]:
+    executable = _pdftotext_path()
+    version_result = subprocess.run([executable, "-v"], capture_output=True, check=False)
+    assert version_result.returncode == 0
+    version = (version_result.stdout + version_result.stderr).decode("utf-8").splitlines()[0]
+    extraction = subprocess.run(
+        [executable, "-f", "1", "-l", "1", "-layout", str(pdf_path), "-"],
+        capture_output=True,
+        check=False,
+    )
+    assert extraction.returncode == 0, extraction.stderr.decode("utf-8", errors="replace")
+    return extraction.stdout, version
+
+
 def _write_jsonl(path: Path, rows) -> bytes:
     data = b"".join(_json_bytes(row) + b"\r\n" for row in rows)
     path.write_bytes(data)
@@ -37,7 +90,8 @@ def _make_source(root: Path, item_id: str, index: int):
     html_path = source_dir / f"official-{index}.html"
     html_path.write_bytes(f"<html><body>{item_id}</body></html>".encode())
     pdf_path = source_dir / f"{item_id}.pdf"
-    pdf_path.write_bytes(f"pinned-pdf-{item_id}".encode())
+    pdf_path.write_bytes(_minimal_pdf(index))
+    extracted_page1, pdftotext_version = _extract_page1(pdf_path)
     cache_receipt = source_dir / f"{item_id}.receipt.json"
     cache_receipt.write_bytes(b'{"text_sha256":"dummy"}')
     cache_text = source_dir / f"{item_id}.txt"
@@ -75,13 +129,13 @@ def _make_source(root: Path, item_id: str, index: int):
         "overlay_is_approval": False,
         "source_status_mutation": False,
     }
-    page1_text = f"Paper {index}: Exact ACL Title\nAuthor {index} A; Author {index} B\nACL 2026"
+    page1_text = extracted_page1.decode("utf-8")
     page1 = {
         "item_id": item_id,
         "pdf_sha256": proof["pdf_sha256"],
-        "page1_text_sha256": _sha(page1_text.encode("utf-8")),
+        "page1_text_sha256": _sha(extracted_page1),
         "page1_text": page1_text,
-        "pdftotext_version": "pdftotext version test-fixture",
+        "pdftotext_version": pdftotext_version,
         "witness_author_id": f"builder-{index}",
     }
     review = {
@@ -201,6 +255,8 @@ def test_projection_conserves_every_source_row_and_holds_missing_review(projecti
     assert len(projection) == len(diagnostic) == 3
     assert len({row["item_id"] for row in projection}) == 3
     assert {row["status"] for row in projection} == {"SUPPORTED", "METADATA_HOLD"}
+    assert all(row["review_authentication"] == "EXTERNAL_QA_REQUIRED" for row in projection)
+    assert all(row["downstream_card_use_approved"] is False for row in projection)
     missing_id = data["ids"][2]
     assert next(row for row in projection if row["item_id"] == missing_id)["hold_reason"] == "REVIEW_MISSING"
     held = next(row for row in projection if row["item_id"] == data["ids"][1])
@@ -211,6 +267,10 @@ def test_projection_conserves_every_source_row_and_holds_missing_review(projecti
     assert receipt["source_admission_approved"] is False
     assert receipt["human_approved"] is False
     assert receipt["graph_ingested"] is False
+    assert receipt["review_authentication"] == "EXTERNAL_QA_REQUIRED"
+    assert receipt["downstream_card_use_approved"] is False
+    assert receipt["toolchain"]["pdftotext_version"].startswith("pdftotext version ")
+    assert len(receipt["toolchain"]["pdftotext_sha256"]) == 64
     _assert_inputs_unchanged(data)
 
 
@@ -275,6 +335,79 @@ def test_altered_queue_row_hash_is_rejected_without_success_receipt(projection_i
     assert "queue" in result.stderr.lower()
     assert not data["out"].exists()
     assert not (data["out"] / "receipt.json").exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_synthetic_unrelated_page1_text_cannot_be_supported_by_recomputed_hashes(projection_inputs):
+    data = projection_inputs
+    page1 = data["page1_rows"][0]
+    page1["page1_text"] = "UNRELATED DOCUMENT BY UNKNOWN AUTHORS / NOT ACL 2026"
+    page1["page1_text_sha256"] = _sha(page1["page1_text"].encode("utf-8"))
+    review = data["reviews"][0]
+    review["page1_text_sha256"] = page1["page1_text_sha256"]
+    review["native_pdf_identity_verified"] = True
+    review["field_verdicts"] = {"title": "PASS", "ordered_authors": "PASS", "venue": "PASS", "year": "PASS"}
+    page1_data = _write_jsonl(data["page1_path"], data["page1_rows"])
+    reviews_data = _write_jsonl(data["reviews_path"], data["reviews"])
+    data["snapshots"][data["page1_path"]] = _sha(page1_data)
+    data["snapshots"][data["reviews_path"]] = _sha(reviews_data)
+    result = _run(data)
+
+    assert result.returncode == 0, result.stderr
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    rejected = next(row for row in projection if row["item_id"] == data["ids"][0])
+    assert rejected["status"] == "METADATA_HOLD"
+    assert rejected["hold_reason"] == "PAGE1_EXTRACTION_MISMATCH"
+    assert all(field["approved"] is None for field in rejected["fields"].values())
+    _assert_inputs_unchanged(data)
+
+
+def test_recorded_pdftotext_version_must_match_the_extractor(projection_inputs):
+    data = projection_inputs
+    data["page1_rows"][0]["pdftotext_version"] = "pdftotext version 0.0.0-forged"
+    page1_data = _write_jsonl(data["page1_path"], data["page1_rows"])
+    data["snapshots"][data["page1_path"]] = _sha(page1_data)
+    result = _run(data)
+
+    assert result.returncode == 0, result.stderr
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    rejected = next(row for row in projection if row["item_id"] == data["ids"][0])
+    assert rejected["status"] == "METADATA_HOLD"
+    assert rejected["hold_reason"] == "PDFTOTEXT_VERSION_MISMATCH"
+    assert all(field["approved"] is None for field in rejected["fields"].values())
+    _assert_inputs_unchanged(data)
+
+
+def test_non_pdf_bytes_cannot_be_supported_even_when_all_declared_hashes_are_recomputed(projection_inputs):
+    data = projection_inputs
+    proof = data["proofs"][0]
+    page1 = data["page1_rows"][0]
+    review = data["reviews"][0]
+    pdf_path = Path(proof["pdf_path"])
+    pdf_path.write_bytes(b"not a PDF document")
+    proof["pdf_sha256"] = _sha(pdf_path.read_bytes())
+    page1["pdf_sha256"] = proof["pdf_sha256"]
+    review["pdf_sha256"] = proof["pdf_sha256"]
+    review["proof_row_sha256"] = _sha(_json_bytes(proof))
+    proof_data = _write_jsonl(data["proof_path"], data["proofs"])
+    receipt = json.loads(data["proof_receipt_path"].read_text(encoding="utf-8"))
+    receipt["final_proof_only_run"]["rows_sha256"] = _sha(proof_data)
+    data["proof_receipt_path"].write_bytes(_json_bytes(receipt))
+    page1_data = _write_jsonl(data["page1_path"], data["page1_rows"])
+    reviews_data = _write_jsonl(data["reviews_path"], data["reviews"])
+    data["snapshots"][pdf_path] = _sha(pdf_path.read_bytes())
+    data["snapshots"][data["proof_path"]] = _sha(proof_data)
+    data["snapshots"][data["proof_receipt_path"]] = _sha(data["proof_receipt_path"].read_bytes())
+    data["snapshots"][data["page1_path"]] = _sha(page1_data)
+    data["snapshots"][data["reviews_path"]] = _sha(reviews_data)
+    result = _run(data)
+
+    assert result.returncode == 0, result.stderr
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    rejected = next(row for row in projection if row["item_id"] == data["ids"][0])
+    assert rejected["status"] == "METADATA_HOLD"
+    assert rejected["hold_reason"] == "PAGE1_EXTRACTION_FAILED"
+    assert all(field["approved"] is None for field in rejected["fields"].values())
     _assert_inputs_unchanged(data)
 
 
