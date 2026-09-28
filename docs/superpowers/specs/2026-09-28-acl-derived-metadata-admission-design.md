@@ -1,6 +1,6 @@
 # ACL 2026 derived metadata admission — design v1
 
-Status: design approved for documentation on 2026-09-28; **not approved for implementation or corpus promotion**. The user must review this committed spec before an implementation plan is written.
+Status: design reviewed and approved by the user for implementation planning on 2026-09-28; **not an approval for corpus promotion**. Code execution follows the separately reviewed implementation plan and its gates.
 
 ## Purpose and boundary
 
