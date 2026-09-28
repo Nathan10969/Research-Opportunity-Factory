@@ -3,6 +3,8 @@
 import hashlib
 import importlib.util
 import json
+import struct
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +17,15 @@ SELECTION = ENGINEERING / "acl-metadata-priority640-20260928-v1/acl_metadata_pri
 PROOF = ENGINEERING / "acl670-metadata-witness-proofonly-v5-20260927/acl_metadata_witness.jsonl"
 RECEIPT = ENGINEERING / "ACL670_WITNESS_FINAL_RUN_RECEIPT.json"
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/build_acl_page1_witness_batch.py"
+
+
+def minimal_png():
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00")) + chunk(b"IEND", b""))
 
 
 def digest(path):
@@ -147,7 +158,7 @@ def test_receipt_hash_closes_upstream_priority_and_proof_receipts(builder, tmp_p
     def produce(command, item_id):
         if command[-1] == "-":
             return f"Page one {item_id}\n".encode()
-        Path(command[-1] + ".png").write_bytes(b"test png bytes")
+        Path(command[-1] + ".png").write_bytes(minimal_png())
         return b""
 
     monkeypatch.setattr(builder, "_run", produce)
@@ -162,6 +173,28 @@ def test_receipt_hash_closes_upstream_priority_and_proof_receipts(builder, tmp_p
     assert receipt["counts"] == {"witness_records": 10, "text_files": 10, "png_files": 10, "reviewer_decisions": 0}
     assert len(receipt["outputs"]) == 21
     assert all(value is False for key, value in receipt.items() if key.endswith("approved") or key.endswith("written") or key.endswith("ingested") or key.endswith("performed") or key == "card_created")
+
+
+@pytest.mark.parametrize("payload", [
+    b"not a PNG despite exit zero",
+    b"\x89PNG\r\n\x1a\n",
+    minimal_png()[:8] + struct.pack(">I", 12) + minimal_png()[12:],
+    minimal_png()[:16] + b"\x00\x00\x00\x00" + minimal_png()[20:],
+    minimal_png()[:29] + b"\x00\x00\x00\x00" + minimal_png()[33:],
+], ids=["wrong-signature", "missing-ihdr", "wrong-ihdr-length", "zero-width", "wrong-ihdr-crc"])
+def test_renderer_success_with_invalid_png_has_no_success_receipt(builder, tmp_path, monkeypatch, payload):
+    monkeypatch.setattr(builder, "_version", lambda executable, name: f"{name} version test")
+
+    def emit_non_png(command, item_id):
+        if command[-1] == "-":
+            return f"Page one {item_id}\n".encode()
+        Path(command[-1] + ".png").write_bytes(payload)
+        return b""
+
+    monkeypatch.setattr(builder, "_run", emit_non_png)
+    with pytest.raises(ValueError, match="PNG"):
+        builder.build(args(tmp_path))
+    assert not (tmp_path / "batch5" / "receipt.json").exists()
 
 
 def test_mid_build_pdf_drift_leaves_no_success_receipt(builder, tmp_path, monkeypatch):

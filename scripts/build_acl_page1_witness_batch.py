@@ -12,7 +12,9 @@ import json
 import os
 import pathlib
 import re
+import struct
 import subprocess
+import zlib
 
 
 SCHEMA = "acl_metadata_page1_witness_input.v1"
@@ -219,6 +221,24 @@ def _run(command: list[str], item_id: str) -> bytes:
     return result.stdout
 
 
+def _verify_png_ihdr(path: pathlib.Path, item_id: str) -> None:
+    """Check the PNG signature and fixed-length IHDR before publishing evidence."""
+    with path.open("rb") as stream:
+        header = stream.read(33)
+    if len(header) != 33 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"{item_id}: invalid PNG signature or truncated IHDR")
+    if struct.unpack(">I", header[8:12])[0] != 13 or header[12:16] != b"IHDR":
+        raise ValueError(f"{item_id}: invalid PNG IHDR chunk")
+    width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", header[16:29])
+    allowed_depths = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
+    if (not 0 < width <= 100_000 or not 0 < height <= 100_000 or width * height > 100_000_000
+            or bit_depth not in allowed_depths.get(color_type, ()) or compression != 0 or filtering != 0
+            or interlace not in (0, 1)):
+        raise ValueError(f"{item_id}: invalid PNG IHDR dimensions or encoding")
+    if struct.unpack(">I", header[29:33])[0] != zlib.crc32(header[12:29]):
+        raise ValueError(f"{item_id}: invalid PNG IHDR CRC")
+
+
 def build(args: argparse.Namespace) -> pathlib.Path:
     selected = validate_inputs(args)
     text_exe, render_exe = pathlib.Path(args.pdftotext), pathlib.Path(args.pdftoppm)
@@ -254,6 +274,7 @@ def build(args: argparse.Namespace) -> pathlib.Path:
         _checked_hash(pdf, proof["pdf_sha256"], f"{item_id}: PDF after render")
         if not png_path.is_file() or png_path.stat().st_size == 0:
             raise ValueError(f"{item_id}: missing/empty page-1 PNG")
+        _verify_png_ihdr(png_path, item_id)
         source_pins = {
             "proof": {"path": str(args.proof), "file_sha256": args.proof_sha256, "physical_line_number": proof["_proof_line_number"], "physical_line_sha256": proof["_proof_line_sha256"], "canonical_row_sha256": proof["_proof_canonical_sha256"]},
             "queue": {"path": proof["queue_path"], "file_sha256": proof["queue_file_sha256"], "physical_line_number": proof["queue_line_number"], "physical_line_sha256": proof["queue_raw_line_sha256"]},
