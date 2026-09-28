@@ -94,6 +94,9 @@ def test_assembles_raw_lines_in_batch_order_and_writes_nonapproval_receipt(tmp_p
     assert receipt["downstream_card_use_approved"] is False
     assert receipt["human_approved"] is False
     assert receipt["graph_ingested"] is False
+    for name in ("page1-witnesses.v1.jsonl", "reviews.v1.jsonl"):
+        data = (out / name).read_bytes()
+        assert receipt["outputs"][name] == {"sha256": _sha(data), "bytes": len(data)}
     assert all(path.read_bytes() == data for path, data in before.items())
 
 
@@ -140,6 +143,78 @@ def test_receipt_io_failure_never_publishes_success_receipt(tmp_path, monkeypatc
                      expected_total=20)
 
     with pytest.raises(OSError, match="injected receipt"):
+        module.assemble(args)
+
+    assert output.is_dir()
+    assert not (output / "receipt.json").exists()
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+@pytest.mark.parametrize("output_name", ["page1-witnesses.v1.jsonl", "reviews.v1.jsonl"])
+def test_short_output_write_never_publishes_receipt(tmp_path, monkeypatch, output_name):
+    root, proof, proof_sha, manifest, _, sources, _ = _fixture(tmp_path)
+    before = {path: path.read_bytes() for path in sources}
+    output = root / "assembled"
+    spec = importlib.util.spec_from_file_location("acl_batch_assembler_for_short_write", CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original_open = Path.open
+
+    class ShortWriter:
+        def __init__(self, real):
+            self.real = real
+
+        def __enter__(self):
+            return self
+
+        def write(self, data):
+            self.real.write(data[:1])
+            return 1
+
+        def __exit__(self, exc_type, exc, tb):
+            return self.real.__exit__(exc_type, exc, tb)
+
+    def open_with_short_write(path, mode="r", *args, **kwargs):
+        real = original_open(path, mode, *args, **kwargs)
+        return ShortWriter(real) if path.name == output_name and mode == "xb" else real
+
+    monkeypatch.setattr(Path, "open", open_with_short_write)
+    args = Namespace(manifest=str(manifest), proof=str(proof), proof_sha256=proof_sha,
+                     corpus_root=str(root), output_dir=str(output), expected_batches=2,
+                     expected_total=20)
+
+    with pytest.raises(OSError, match="short output write"):
+        module.assemble(args)
+
+    assert output.is_dir()
+    assert not (output / "receipt.json").exists()
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+@pytest.mark.parametrize("fault", ["changed_bytes", "read_error"])
+def test_output_readback_failure_never_publishes_receipt(tmp_path, monkeypatch, fault):
+    root, proof, proof_sha, manifest, _, sources, _ = _fixture(tmp_path)
+    before = {path: path.read_bytes() for path in sources}
+    output = root / "assembled"
+    spec = importlib.util.spec_from_file_location("acl_batch_assembler_for_readback", CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original_read = Path.read_bytes
+
+    def read_with_fault(path):
+        data = original_read(path)
+        if path.name == "page1-witnesses.v1.jsonl":
+            if fault == "read_error":
+                raise OSError("injected output readback failure")
+            return b"X" + data[1:]
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_with_fault)
+    args = Namespace(manifest=str(manifest), proof=str(proof), proof_sha256=proof_sha,
+                     corpus_root=str(root), output_dir=str(output), expected_batches=2,
+                     expected_total=20)
+
+    with pytest.raises((OSError, ValueError), match="output readback"):
         module.assemble(args)
 
     assert output.is_dir()

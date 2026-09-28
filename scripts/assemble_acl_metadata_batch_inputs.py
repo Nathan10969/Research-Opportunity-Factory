@@ -247,10 +247,7 @@ def assemble(args: argparse.Namespace) -> Path:
                          "qa_report_sha256": e["qa_report_sha256"]}
                         for n, e in sorted(reviews.items())],
         },
-        "outputs": {
-            "page1-witnesses.v1.jsonl": {"sha256": _sha(page1_output), "bytes": len(page1_output)},
-            "reviews.v1.jsonl": {"sha256": _sha(review_output), "bytes": len(review_output)},
-        },
+        "outputs": {},
         "counts": {"expected_batches": args.expected_batches, "expected_total": args.expected_total,
                    "proof_rows": len(proof_rows), "witness_batches": len(witnesses),
                    "witness_rows": len(witness_ids), "review_batches": len(reviews),
@@ -266,10 +263,21 @@ def assemble(args: argparse.Namespace) -> Path:
         "overlay_is_approval": False,
     }
     output.mkdir(exist_ok=False)
-    with (output / "page1-witnesses.v1.jsonl").open("xb") as handle:
-        handle.write(page1_output)
-    with (output / "reviews.v1.jsonl").open("xb") as handle:
-        handle.write(review_output)
+    for name, expected_data in (("page1-witnesses.v1.jsonl", page1_output),
+                                ("reviews.v1.jsonl", review_output)):
+        path = output / name
+        with path.open("xb") as handle:
+            if handle.write(expected_data) != len(expected_data):
+                raise OSError(f"short output write: {name}")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            actual_data = path.read_bytes()
+        except OSError as exc:
+            raise OSError(f"output readback failed: {name}: {exc}") from exc
+        if actual_data != expected_data:
+            raise ValueError(f"output readback mismatch: {name}")
+        receipt["outputs"][name] = {"sha256": _sha(actual_data), "bytes": len(actual_data)}
     receipt_data = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
     pending_receipt = output / "receipt.json.pending"
     with pending_receipt.open("xb") as handle:
