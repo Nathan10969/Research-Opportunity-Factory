@@ -221,22 +221,65 @@ def _run(command: list[str], item_id: str) -> bytes:
     return result.stdout
 
 
-def _verify_png_ihdr(path: pathlib.Path, item_id: str) -> None:
-    """Check the PNG signature and fixed-length IHDR before publishing evidence."""
-    with path.open("rb") as stream:
-        header = stream.read(33)
-    if len(header) != 33 or header[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError(f"{item_id}: invalid PNG signature or truncated IHDR")
-    if struct.unpack(">I", header[8:12])[0] != 13 or header[12:16] != b"IHDR":
-        raise ValueError(f"{item_id}: invalid PNG IHDR chunk")
-    width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", header[16:29])
-    allowed_depths = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
-    if (not 0 < width <= 100_000 or not 0 < height <= 100_000 or width * height > 100_000_000
-            or bit_depth not in allowed_depths.get(color_type, ()) or compression != 0 or filtering != 0
-            or interlace not in (0, 1)):
-        raise ValueError(f"{item_id}: invalid PNG IHDR dimensions or encoding")
-    if struct.unpack(">I", header[29:33])[0] != zlib.crc32(header[12:29]):
-        raise ValueError(f"{item_id}: invalid PNG IHDR CRC")
+def _verify_png(data: bytes, item_id: str) -> None:
+    """Validate the complete, bounded RGB8 Poppler PNG byte stream."""
+    if len(data) < 57 or len(data) > 100_000_000 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"{item_id}: invalid PNG size or signature")
+    cursor = 8
+    dimensions = None
+    idat_parts = []
+    idat_ended = False
+    for chunk_number in range(10_000):
+        if cursor + 12 > len(data):
+            raise ValueError(f"{item_id}: truncated PNG chunk or missing IEND")
+        length = struct.unpack(">I", data[cursor:cursor + 4])[0]
+        end = cursor + 12 + length
+        if end > len(data):
+            raise ValueError(f"{item_id}: truncated PNG chunk data")
+        kind = data[cursor + 4:cursor + 8]
+        payload = data[cursor + 8:cursor + 8 + length]
+        if not all(65 <= char <= 90 or 97 <= char <= 122 for char in kind):
+            raise ValueError(f"{item_id}: malformed PNG chunk type")
+        if struct.unpack(">I", data[end - 4:end])[0] != zlib.crc32(kind + payload):
+            raise ValueError(f"{item_id}: PNG chunk CRC mismatch")
+        if chunk_number == 0:
+            if kind != b"IHDR" or length != 13:
+                raise ValueError(f"{item_id}: invalid PNG IHDR")
+            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
+            if (not 0 < width <= 100_000 or not 0 < height <= 100_000 or width * height > 25_000_000
+                    or (bit_depth, color_type, compression, filtering, interlace) != (8, 2, 0, 0, 0)):
+                raise ValueError(f"{item_id}: unsupported PNG IHDR dimensions or encoding")
+            dimensions = (width, height)
+        elif kind == b"IHDR":
+            raise ValueError(f"{item_id}: duplicate PNG IHDR")
+        elif kind == b"IDAT":
+            if idat_ended:
+                raise ValueError(f"{item_id}: nonconsecutive PNG IDAT chunks")
+            idat_parts.append(payload)
+        elif kind == b"IEND":
+            if length != 0 or not idat_parts or end != len(data):
+                raise ValueError(f"{item_id}: invalid PNG IEND or trailing data")
+            break
+        else:
+            if idat_parts:
+                idat_ended = True
+            if kind[0] & 0x20 == 0 and kind != b"PLTE":
+                raise ValueError(f"{item_id}: unsupported critical PNG chunk")
+        cursor = end
+    else:
+        raise ValueError(f"{item_id}: too many PNG chunks or missing IEND")
+    width, height = dimensions
+    expected = (1 + 3 * width) * height
+    try:
+        decoder = zlib.decompressobj()
+        scanlines = decoder.decompress(b"".join(idat_parts), expected + 1)
+        if len(scanlines) <= expected:
+            scanlines += decoder.flush(expected - len(scanlines) + 1)
+    except zlib.error as exc:
+        raise ValueError(f"{item_id}: invalid PNG IDAT zlib stream") from exc
+    if (len(scanlines) != expected or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail
+            or any(scanlines[row * (1 + 3 * width)] > 4 for row in range(height))):
+        raise ValueError(f"{item_id}: invalid PNG IDAT scanlines or filters")
 
 
 def build(args: argparse.Namespace) -> pathlib.Path:
@@ -274,7 +317,8 @@ def build(args: argparse.Namespace) -> pathlib.Path:
         _checked_hash(pdf, proof["pdf_sha256"], f"{item_id}: PDF after render")
         if not png_path.is_file() or png_path.stat().st_size == 0:
             raise ValueError(f"{item_id}: missing/empty page-1 PNG")
-        _verify_png_ihdr(png_path, item_id)
+        png_bytes = png_path.read_bytes()
+        _verify_png(png_bytes, item_id)
         source_pins = {
             "proof": {"path": str(args.proof), "file_sha256": args.proof_sha256, "physical_line_number": proof["_proof_line_number"], "physical_line_sha256": proof["_proof_line_sha256"], "canonical_row_sha256": proof["_proof_canonical_sha256"]},
             "queue": {"path": proof["queue_path"], "file_sha256": proof["queue_file_sha256"], "physical_line_number": proof["queue_line_number"], "physical_line_sha256": proof["queue_raw_line_sha256"]},
@@ -285,7 +329,7 @@ def build(args: argparse.Namespace) -> pathlib.Path:
         }
         for path_key, hash_key in _SOURCE_PINS:
             source_hashes[proof[path_key]] = proof[hash_key]
-        text_hash, png_hash = sha(text_bytes), file_sha(png_path)
+        text_hash, png_hash = sha(text_bytes), sha(png_bytes)
         output_hashes[str(text_path)] = text_hash
         output_hashes[str(png_path)] = png_hash
         rows.append({"schema_version": SCHEMA, "item_id": item_id,
@@ -293,7 +337,7 @@ def build(args: argparse.Namespace) -> pathlib.Path:
                      "pdf_page1": {"text": text, "text_sha256": text_hash, "text_utf8_bytes": len(text_bytes),
                                    "pdftotext_version": text_version, "extraction_command": "pdftotext -f 1 -l 1 -layout <pinned-pdf-path> -",
                                    "text_evidence": {"path": str(text_path), "sha256": text_hash, "bytes": len(text_bytes)},
-                                   "render_evidence": {"path": str(png_path), "sha256": png_hash, "bytes": png_path.stat().st_size, "renderer": render_version, "page": 1, "resolution_dpi": 120}},
+                                   "render_evidence": {"path": str(png_path), "sha256": png_hash, "bytes": len(png_bytes), "renderer": render_version, "page": 1, "resolution_dpi": 120}},
                      "witness_author_id": "codex-agent-acl670-page1-batch-generator",
                      "source_pins": source_pins,
                      "witness_observations": {"title_visual_observation": "NOT_REVIEWED", "ordered_author_visual_observation": "NOT_REVIEWED", "proceedings_footer_visual_observation": "NOT_REVIEWED", "uncertainty_or_conflict": "NOT_REVIEWED"}})

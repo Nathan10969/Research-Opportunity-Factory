@@ -19,13 +19,16 @@ RECEIPT = ENGINEERING / "ACL670_WITNESS_FINAL_RUN_RECEIPT.json"
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/build_acl_page1_witness_batch.py"
 
 
-def minimal_png():
-    def chunk(kind, data):
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+def png_chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
 
+
+def minimal_png(*, raw_scanline=b"\x00\x00\x00\x00", compressed=None):
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00")) + chunk(b"IEND", b""))
+    if compressed is None:
+        compressed = zlib.compress(raw_scanline)
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr)
+            + png_chunk(b"IDAT", compressed) + png_chunk(b"IEND", b""))
 
 
 def digest(path):
@@ -181,7 +184,13 @@ def test_receipt_hash_closes_upstream_priority_and_proof_receipts(builder, tmp_p
     minimal_png()[:8] + struct.pack(">I", 12) + minimal_png()[12:],
     minimal_png()[:16] + b"\x00\x00\x00\x00" + minimal_png()[20:],
     minimal_png()[:29] + b"\x00\x00\x00\x00" + minimal_png()[33:],
-], ids=["wrong-signature", "missing-ihdr", "wrong-ihdr-length", "zero-width", "wrong-ihdr-crc"])
+    minimal_png()[:33],
+    minimal_png(compressed=b"not a zlib stream"),
+    minimal_png()[:-1] + bytes([minimal_png()[-1] ^ 1]),
+    minimal_png() + b"trailing bytes",
+    minimal_png(raw_scanline=b"\x05\x00\x00\x00"),
+], ids=["wrong-signature", "missing-ihdr", "wrong-ihdr-length", "zero-width", "wrong-ihdr-crc",
+        "truncated-after-ihdr", "invalid-idat-zlib", "wrong-iend-crc", "trailing-data", "invalid-filter"])
 def test_renderer_success_with_invalid_png_has_no_success_receipt(builder, tmp_path, monkeypatch, payload):
     monkeypatch.setattr(builder, "_version", lambda executable, name: f"{name} version test")
 
