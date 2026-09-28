@@ -69,20 +69,34 @@ def test_altered_proof_hash_rejected(builder, tmp_path):
         builder.validate_inputs(args(tmp_path, proof=changed))
 
 
-def test_duplicate_selected_id_rejected_even_with_rehashed_selection(builder, tmp_path):
+@pytest.mark.parametrize("field,source,label", [
+    ("selection", SELECTION, "selection"),
+    ("proof", PROOF, "proof"),
+    ("proof_receipt", RECEIPT, "proof receipt"),
+])
+def test_self_consistently_rehashed_replacement_is_not_frozen_authority(builder, tmp_path, field, source, label):
+    changed = tmp_path / source.name
+    changed.write_bytes(source.read_bytes() + b" ")
+    with pytest.raises(ValueError, match=f"approved {label} SHA-256"):
+        builder.validate_inputs(args(tmp_path, **{field: changed, field + "_sha256": digest(changed)}))
+
+
+def test_duplicate_selected_id_rejected_after_authority_gate(builder, tmp_path, monkeypatch):
     changed = tmp_path / "selection.json"
     data = json.loads(SELECTION.read_text(encoding="utf-8"))
     data["batches"][1]["item_ids"][1] = data["batches"][1]["item_ids"][0]
     changed.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(builder, "APPROVED_SELECTION_SHA256", digest(changed))
     with pytest.raises(ValueError, match="duplicate|mismatch"):
         builder.validate_inputs(args(tmp_path, selection=changed, selection_sha256=digest(changed)))
 
 
-def test_missing_selected_id_rejected_even_with_rehashed_selection(builder, tmp_path):
+def test_missing_selected_id_rejected_after_authority_gate(builder, tmp_path, monkeypatch):
     changed = tmp_path / "selection.json"
     data = json.loads(SELECTION.read_text(encoding="utf-8"))
     data["batches"][1]["item_ids"][0] = "2026.findings-acl.absent"
     changed.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(builder, "APPROVED_SELECTION_SHA256", digest(changed))
     with pytest.raises(ValueError, match="missing|mismatch"):
         builder.validate_inputs(args(tmp_path, selection=changed, selection_sha256=digest(changed)))
 
@@ -107,13 +121,12 @@ def test_existing_output_directory_rejected(builder, tmp_path):
         builder.validate_inputs(args(tmp_path))
 
 
-def test_rehashed_selection_with_wrong_priority30_source_pin_rejected(builder, tmp_path):
-    changed = tmp_path / "selection.json"
-    data = json.loads(SELECTION.read_text(encoding="utf-8"))
-    data["source_priority30_selection_sha256"] = "0" * 64
-    changed.write_text(json.dumps(data), encoding="utf-8")
+def test_priority30_source_hash_mismatch_rejected(builder, tmp_path, monkeypatch):
+    priority = json.loads(SELECTION.read_text(encoding="utf-8"))["source_priority30_selection_path"]
+    original = builder.file_sha
+    monkeypatch.setattr(builder, "file_sha", lambda path: "0" * 64 if str(path) == priority else original(path))
     with pytest.raises(ValueError, match="priority30 selection SHA-256"):
-        builder.validate_inputs(args(tmp_path, selection=changed, selection_sha256=digest(changed)))
+        builder.validate_inputs(args(tmp_path))
 
 
 def test_symlink_output_ancestor_rejected(builder, tmp_path):
@@ -149,3 +162,28 @@ def test_receipt_hash_closes_upstream_priority_and_proof_receipts(builder, tmp_p
     assert receipt["counts"] == {"witness_records": 10, "text_files": 10, "png_files": 10, "reviewer_decisions": 0}
     assert len(receipt["outputs"]) == 21
     assert all(value is False for key, value in receipt.items() if key.endswith("approved") or key.endswith("written") or key.endswith("ingested") or key.endswith("performed") or key == "card_created")
+
+
+def test_mid_build_pdf_drift_leaves_no_success_receipt(builder, tmp_path, monkeypatch):
+    selected = json.loads(PROOF.read_text(encoding="utf-8").splitlines()[10])
+    pdf = tmp_path / "synthetic.pdf"
+    pdf.write_bytes(b"%PDF-1.4 synthetic pinned bytes")
+    selected["pdf_path"] = str(pdf)
+    selected["pdf_sha256"] = digest(pdf)
+    selected.update(_proof_line_number=11, _proof_line_sha256="0" * 64,
+                    _proof_canonical_sha256="0" * 64)
+    monkeypatch.setattr(builder, "validate_inputs", lambda options: [selected])
+    monkeypatch.setattr(builder, "_version", lambda executable, name: f"{name} version test")
+
+    def drift_during_render(command, item_id):
+        if command[-1] == "-":
+            return b"Page one synthetic text\n"
+        Path(command[-1] + ".png").write_bytes(b"test png bytes")
+        pdf.write_bytes(b"%PDF-1.4 changed during render")
+        return b""
+
+    monkeypatch.setattr(builder, "_run", drift_during_render)
+    with pytest.raises(ValueError, match="PDF.*SHA-256|pdf_path.*SHA-256"):
+        builder.build(args(tmp_path))
+    assert not (tmp_path / "batch5" / "receipt.json").exists()
+    assert pdf.read_bytes() == b"%PDF-1.4 changed during render"

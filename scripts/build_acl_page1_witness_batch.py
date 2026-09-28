@@ -16,6 +16,9 @@ import subprocess
 
 
 SCHEMA = "acl_metadata_page1_witness_input.v1"
+APPROVED_SELECTION_SHA256 = "6d94272fe91d84983504da54a34f95027578ee2824788244e87f5cb312125557"
+FROZEN_PROOF_SHA256 = "375b75a511042b5e617a69649814d4c599a9b5d6a411d8f076c13ac48796cb8a"
+FROZEN_PROOF_RECEIPT_SHA256 = "2cf9982c0f39c7d82098baaf7ed41c759b83f45fd46b61fd752c899a0a669205"
 _ID = re.compile(r"2026\.(?:findings-acl|acl)\.\d+\Z")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _SOURCE_PINS = (
@@ -130,6 +133,11 @@ def validate_inputs(args: argparse.Namespace) -> list[dict]:
     # Reject an out-of-scope batch before touching heavyweight frozen inputs.
     if type(args.batch_number) is not int or not 5 <= args.batch_number <= 67:
         raise ValueError("batch number must be 5..67")
+    for label, supplied, frozen in (("selection", args.selection_sha256, APPROVED_SELECTION_SHA256),
+                                    ("proof", args.proof_sha256, FROZEN_PROOF_SHA256),
+                                    ("proof receipt", args.proof_receipt_sha256, FROZEN_PROOF_RECEIPT_SHA256)):
+        if supplied != frozen:
+            raise ValueError(f"approved {label} SHA-256 mismatch")
     for path, expected, label in ((args.selection, args.selection_sha256, "selection"),
                                   (args.proof, args.proof_sha256, "proof"),
                                   (args.proof_receipt, args.proof_receipt_sha256, "proof receipt")):
@@ -237,11 +245,13 @@ def build(args: argparse.Namespace) -> pathlib.Path:
         text_path = output / "page1-text" / f"{item_id}.page1.txt"
         png_path = output / "page1-render" / f"{item_id}.page1.png"
         text_bytes = _run([str(text_exe), "-f", "1", "-l", "1", "-layout", str(pdf), "-"], item_id)
+        _checked_hash(pdf, proof["pdf_sha256"], f"{item_id}: PDF after extraction")
         text = text_bytes.decode("utf-8", errors="strict")
         if not text.strip():
             raise ValueError(f"{item_id}: empty page-1 text")
         text_path.write_bytes(text_bytes)
         _run([str(render_exe), "-f", "1", "-l", "1", "-singlefile", "-r", "120", "-png", str(pdf), str(png_path.with_suffix(""))], item_id)
+        _checked_hash(pdf, proof["pdf_sha256"], f"{item_id}: PDF after render")
         if not png_path.is_file() or png_path.stat().st_size == 0:
             raise ValueError(f"{item_id}: missing/empty page-1 PNG")
         source_pins = {
@@ -269,6 +279,10 @@ def build(args: argparse.Namespace) -> pathlib.Path:
     witness = output / "acl_metadata_page1_witness_input.v1.jsonl"
     witness.write_bytes(b"".join(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n" for row in rows))
     output_hashes[str(witness)] = file_sha(witness)
+    for path, expected in source_hashes.items():
+        _checked_hash(pathlib.Path(path), expected, "source input before receipt")
+    for path, expected in output_hashes.items():
+        _checked_hash(pathlib.Path(path), expected, "output before receipt")
     receipt = {"schema_version": "acl_metadata_task5_page1_batch_generator_receipt.v1", "scope": "Task 5 Step 1 evidence-only mechanical page-1 witness batch",
                "batch_number": args.batch_number, "item_ids": [r["item_id"] for r in rows],
                "selection_authority": "DETERMINISTIC_REMAINDER_SELECTION_ONLY_NOT_APPROVAL",
