@@ -206,3 +206,22 @@ def test_queue_identity_fields_must_be_valid_before_projection(field):
 
     with pytest.raises(ValueError):
         validate_admission(proof, page1, review)
+
+
+@pytest.mark.parametrize("pdf_path", [None, "  ", 42])
+def test_pdf_path_must_be_present_and_nonempty_before_supported_projection(pdf_path):
+    proof, page1, review = _fixture()
+    proof["pdf_path"] = pdf_path
+    review["proof_row_sha256"] = _canonical_sha256(proof)
+
+    with pytest.raises(ValueError):
+        validate_admission(proof, page1, review)
+
+
+def test_pdf_path_must_exist_in_proof_before_supported_projection():
+    proof, page1, review = _fixture()
+    proof.pop("pdf_path")
+    review["proof_row_sha256"] = _canonical_sha256(proof)
+
+    with pytest.raises(ValueError):
+        validate_admission(proof, page1, review)

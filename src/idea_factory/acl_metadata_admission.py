@@ -78,6 +78,7 @@ def validate_admission(proof: dict, page1: dict, review: dict) -> dict:
         raise ValueError("official witness year must be an integer")
 
     pdf_sha256 = _require_sha256(proof.get("pdf_sha256"), "proof PDF hash")
+    _require_nonempty(proof.get("pdf_path"), "proof PDF path")
     _require_nonempty(proof.get("queue_path"), "proof queue path")
     _require_sha256(proof.get("queue_file_sha256"), "proof queue file hash")
     queue_line_number = proof.get("queue_line_number")
