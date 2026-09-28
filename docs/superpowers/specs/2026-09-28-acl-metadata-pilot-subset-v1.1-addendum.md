@@ -1,0 +1,41 @@
+# ACL metadata pilot subset mode — design addendum v1.1
+
+Status: bounded addendum to `2026-09-28-acl-derived-metadata-admission-design.md` and its implementation plan. It clarifies the Task 4 pilot boundary only; it does not authorize a pilot run, corpus promotion, Card generation, or public release.
+
+## Problem and scope
+
+The Task 3 builder currently binds the proof-row count to `--expected-count`. The frozen proof-only receipt and row file cover 670 items, while Task 4 must emit a ten-item pilot. Cropping the proof file and manufacturing a matching ten-row proof receipt would sever the pilot from the authoritative census. Task 4's actual evidence files also do not directly match the flat Task 2 admission schemas: page-1 witnesses are nested, and reviewer decisions are aggregate evidence records rather than exact per-item review rows.
+
+This addendum defines a parent-linked subset mode. The authoritative parent remains the original, pinned 670-row proof file and its original proof-only receipt. The builder validates all 670 source rows and their pins, then emits exactly the ten pre-frozen pilot IDs into a new output run. It never creates or accepts a cropped/derived proof receipt as a substitute for the parent receipt.
+
+## Input and selection contract
+
+- Full mode remains unchanged: require 670 unique proof rows and the original receipt's 670-row scope, then emit all 670 dispositions.
+- Pilot subset mode requires the same full 670-row proof file and original receipt. It additionally requires an explicit selection-list path and SHA-256. The list contains exactly the ten IDs already frozen in Task 4 of the approved plan: `2026.findings-acl.1077`, `.1105`, `.1174`, `.1266`, `.1320`, `.135`, `.1371`, `.1388`, `.1412`, and `.1530`.
+- The parent receipt/hash and proof-row hash must be established from the authoritative proof-only run, including readback of `F:\LLM_Evoke\runs\parallel24-20260927-1340\engineering\ACL670_WITNESS_FINAL_RUN_RECEIPT.json`; do not compute a digest from an arbitrary candidate receipt and treat it as the trust root. A receipt generated for this pilot is always a child and cannot be used as the parent's proof-only receipt.
+- Production CLI modes are exactly full mode (670 parent rows, 670 output rows) or pilot subset mode (670 parent rows, ten selected output rows). An arbitrary `--expected-count` must not enable a three-row or other partial production run. Small unit tests may exercise pure parsing/join helpers, but may not weaken the CLI's parent/output cardinality contract.
+- Parse the selection list as strict UTF-8, one canonical ACL ID per nonblank line, with no duplicates, comments, or extra columns. Its set must equal the frozen ten-ID set, and every ID must occur exactly once in the parent proof. Reject a missing, additional, duplicate, noncanonical, `TEST_ONLY`, or unknown ID before creating output. The selection-list file must be under the explicit corpus root and have no symlink/reparse components. Verify the supplied selection-list hash before parsing and again immediately before output.
+- In subset mode, validate all 670 proof rows and rehash every referenced queue, physical queue row, manifest, physical manifest row, official HTML, PDF, cache receipt, and cache text as in Task 3. Recheck all snapshots before output. Then select exactly the ten requested parent rows for page-1/review admission and output. A missing selected page-1 witness or exact review row becomes an explicit HOLD; it does not reduce output count.
+- The new receipt records `run_mode=PILOT_SUBSET`, parent proof receipt path/hash, parent proof-row path/hash, `parent_row_count=670`, selection-list path/hash, the exact selected IDs, `selected_row_count=10`, `output_row_count=10`, output hashes, counts, and all existing false admission/downstream flags. The ten-row receipt is a child-run receipt only; it must not masquerade as the original 670-row proof receipt. All outputs are newly and exclusively created under the explicit corpus root.
+
+## Evidence normalization and reviewer boundary
+
+The Task 4 `page1_witnesses.v1.jsonl` artifact is nested, whereas `validate_admission` accepts a flat six-field witness. Add a versioned, deterministic input-normalization adapter that reads the actual Task 4 schema and maps only exact, unambiguous, per-ID values already present in that artifact or its pinned extraction receipt. Before implementing the mapping, inventory representative and edge-case records and document the exact source path for each mapped field. Never infer `witness_author_id`, item ID, PDF hash, page text, extractor version, or text hash from filenames, nearby rows, reviewer records, or defaults. Recompute the text hash from the exact mapped UTF-8 text and independently extract page 1 from the pinned PDF as Task 3 now requires. If a required field is absent, contradictory, or ambiguous, produce a reasoned HOLD; do not synthesize a complete witness.
+
+The aggregate `independent_reviewer_decisions.v1.jsonl` is not itself an exact Task 2 review row. The adapter must not translate an aggregate/LLM decision into `SUPPORTED`, infer PASS verdicts, invent reviewer consent, or fabricate `native_pdf_identity_verified`. For each of the ten selected items, require an independently authored exact review record with the Task 2 schema, bound to the canonical proof-row hash, pinned PDF hash, normalized page-1 text hash, explicit decision, reviewer identity/time/reason, native visual identity confirmation, and four field verdicts. Existing aggregate records may be retained as provenance references, but they do not replace that per-item attestation. Where a required exact review value is not explicitly evidenced in a valid independent record, the item remains HOLD until a reviewer supplies a new exact record.
+
+The current trust model remains process-based, not cryptographic: JSON hashes prove byte identity, not reviewer identity. Before any downstream Card use, ROOT must independently verify the reviewer receipt/task provenance and native visual check for the applicable batch. `SUPPORTED` is provisional until that external QA gate is recorded; output flags remain `source_admission_approved=false`, `human_approved=false`, `graph_ingested=false`, `review_authentication=EXTERNAL_QA_REQUIRED`, and `downstream_card_use_approved=false`. No Task 3/4 command itself promotes the data or bypasses that gate.
+
+## Required negative and conservation tests
+
+The subset-mode tests must include:
+
+1. A true parent fixture/contract: original receipt and proof both remain 670; a fabricated ten-row parent receipt or ten-row proof file is rejected.
+2. Wrong, duplicate, missing, additional, noncanonical, and `TEST_ONLY` selection IDs are rejected before output; a stale selection-list hash is rejected.
+3. A selected ID absent from the parent proof is rejected. Every selected ID present in the parent appears exactly once in both diagnostic and projection outputs, even when its page-1 or review evidence is missing or held.
+4. The nested page-1 adapter rejects wrong item/PDF identity, mismatched extracted text/hash, missing/ambiguous required fields, and conflicting nested values. It must not invent witness authorship or extractor metadata.
+5. An aggregate reviewer decision without a separately supplied, exact, independently authored review row cannot produce `SUPPORTED`. Review records bound to another proof row/PDF/page-1 hash, duplicate reviewer rows, or reviewer/witness-author identity collision fail closed.
+6. A synthetic fixture with nine valid review rows and one missing/held review emits exactly ten rows, with nine `SUPPORTED` and one `METADATA_HOLD`; this is a conservation test only, not an expected outcome for the real pilot.
+7. A full-mode regression still emits exactly 670 rows. In both modes, original input bytes are unchanged on success and failure, and subset output never includes unselected IDs or synthetic controls.
+
+The real pilot remains ten exact real IDs, with separate synthetic negative controls that never enter the parent proof or real subset output. Any missing evidence, normalization conflict, or incomplete reviewer record stays visibly HOLD; do not drop it or recast it as a full-corpus result.
