@@ -359,6 +359,9 @@ def test_ten_id_subset_conserves_nine_supported_and_one_missing_review(projectio
     assert receipt["page1_adapter"]["protocol_sha256"] == _sha(
         (WORKTREE / "src" / "idea_factory" / "acl_task4_evidence_adapter.py").read_bytes()
     )
+    assert receipt["admission_module_sha256"] == _sha(
+        (WORKTREE / "src" / "idea_factory" / "acl_metadata_admission.py").read_bytes()
+    )
     assert receipt["page1_adapter"]["raw_input_path"] == str(data["page1_path"])
     assert receipt["page1_adapter"]["raw_input_sha256"] == _sha(data["page1_path"].read_bytes())
     assert len(receipt["page1_adapter"]["raw_input_row_sha256"]) == 10
@@ -804,6 +807,28 @@ def test_output_directory_is_exclusive_and_existing_bytes_are_preserved(projecti
     assert "exist" in result.stderr.lower() or "exclusive" in result.stderr.lower()
     assert sentinel.read_bytes() == b"do not overwrite"
     assert not (data["out"] / "receipt.json").exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_output_write_failure_leaves_no_partial_final_directory(projection_inputs, monkeypatch):
+    data = projection_inputs
+    calls = 0
+
+    def fail_fsync(_fd):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("injected receipt fsync failure")
+
+    monkeypatch.setattr(BUILDER.os, "fsync", fail_fsync)
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode != 0
+    assert "injected receipt fsync failure" in result.stderr
+    assert calls == 3
+    assert not data["out"].exists()
+    staging = list(data["out"].parent.glob(f".{data['out'].name}.staging-*")) if data["out"].parent.exists() else []
+    assert staging == []
     _assert_inputs_unchanged(data)
 
 

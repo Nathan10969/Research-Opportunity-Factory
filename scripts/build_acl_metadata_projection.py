@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -593,24 +594,8 @@ def build(args: argparse.Namespace) -> Path:
     if selection_path is not None and _sha(selection_path.read_bytes()) != selection_sha:
         raise ValueError("selection-list hash changed immediately before output")
 
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    _inside(output_dir.parent, root, "output parent")
-    try:
-        output_dir.mkdir(parents=False, exist_ok=False)
-    except FileExistsError as exc:
-        raise ValueError(f"output directory already exists; exclusive creation refused: {output_dir}") from exc
-    _reject_reparse_components(output_dir)
-
     witness_bytes = _jsonl_bytes(diagnostic_rows)
     projection_bytes = _jsonl_bytes(projection_rows)
-    witness_path = output_dir / "acl_metadata_witness.v1.jsonl"
-    projection_path = output_dir / "acl_metadata_projection.v1.jsonl"
-    for path, data in ((witness_path, witness_bytes), (projection_path, projection_bytes)):
-        with path.open("xb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-
     counts = {
         "SUPPORTED": sum(row["status"] == "SUPPORTED" for row in projection_rows),
         "METADATA_HOLD": sum(row["status"] == "METADATA_HOLD" for row in projection_rows),
@@ -631,6 +616,7 @@ def build(args: argparse.Namespace) -> Path:
         "output_row_count": len(projection_rows),
         "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "protocol_sha256": script_hash,
+        "admission_module_sha256": _sha(Path(validate_admission.__code__.co_filename).read_bytes()),
         "toolchain": {
             "pdftotext_path": str(pdftotext_path),
             "pdftotext_sha256": pdftotext_sha256,
@@ -665,12 +651,32 @@ def build(args: argparse.Namespace) -> Path:
         "review_authentication": "EXTERNAL_QA_REQUIRED",
         "downstream_card_use_approved": False,
     }
-    receipt_path = output_dir / "receipt.json"
     receipt_bytes = json.dumps(receipt, sort_keys=True, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-    with receipt_path.open("xb") as handle:
-        handle.write(receipt_bytes)
-        handle.flush()
-        os.fsync(handle.fileno())
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    _inside(output_dir.parent, root, "output parent")
+    if output_dir.exists():
+        raise ValueError(f"output directory already exists; exclusive creation refused: {output_dir}")
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
+    try:
+        _inside(staging_dir, root, "staging output directory")
+        _reject_reparse_components(staging_dir)
+        files = (
+            ("acl_metadata_witness.v1.jsonl", witness_bytes),
+            ("acl_metadata_projection.v1.jsonl", projection_bytes),
+            ("receipt.json", receipt_bytes),
+        )
+        for name, data in files:
+            with (staging_dir / name).open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        # Same-parent rename publishes the complete run atomically. The staging
+        # directory is nonempty, so a concurrent completed output is not replaced.
+        os.rename(staging_dir, output_dir)
+    except Exception:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        raise
     return output_dir
 
 

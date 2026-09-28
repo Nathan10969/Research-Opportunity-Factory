@@ -126,6 +126,26 @@ def test_reviewed_at_utc_rejects_malformed_or_non_utc_timestamps(timestamp):
 
 
 @pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reviewer_id", " independent-reviewer-b"),
+        ("reviewer_id", "independent-reviewer-b "),
+        ("witness_author_id", " builder-a"),
+        ("witness_author_id", "builder-a "),
+    ],
+)
+def test_review_and_witness_ids_reject_leading_or_trailing_whitespace(field, value):
+    proof, page1, review = _fixture()
+    if field == "reviewer_id":
+        review[field] = value
+    else:
+        page1[field] = value
+
+    with pytest.raises(ValueError, match="must not have leading or trailing whitespace"):
+        validate_admission(proof, page1, review)
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "item_id",

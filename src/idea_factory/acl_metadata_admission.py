@@ -42,6 +42,13 @@ def _require_nonempty(value: object, label: str) -> str:
     return value
 
 
+def _require_identifier(value: object, label: str) -> str:
+    identifier = _require_nonempty(value, label)
+    if identifier != identifier.strip():
+        raise ValueError(f"{label} must not have leading or trailing whitespace")
+    return identifier
+
+
 def _require_utc_timestamp(value: object) -> str:
     timestamp = _require_nonempty(value, "reviewed_at_utc")
     if not (timestamp.endswith("Z") or timestamp.endswith("+00:00")):
@@ -118,9 +125,9 @@ def validate_admission(proof: dict, page1: dict, review: dict) -> dict:
     if _require_sha256(review["page1_text_sha256"], "review page1 text hash") != page1_text_sha256:
         raise ValueError("review page1 text hash differs from the page1 witness")
     _require_nonempty(page1["pdftotext_version"], "pdftotext version")
-    witness_author_id = _require_nonempty(page1["witness_author_id"], "page1 witness author ID")
+    witness_author_id = _require_identifier(page1["witness_author_id"], "page1 witness author ID")
 
-    reviewer_id = _require_nonempty(review["reviewer_id"], "reviewer ID")
+    reviewer_id = _require_identifier(review["reviewer_id"], "reviewer ID")
     if reviewer_id == witness_author_id:
         raise ValueError("reviewer must differ from the page1 witness author")
     _require_utc_timestamp(review["reviewed_at_utc"])
