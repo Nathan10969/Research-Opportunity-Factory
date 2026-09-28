@@ -365,6 +365,8 @@ def test_projection_conserves_every_source_row_and_holds_missing_review(projecti
     assert receipt["downstream_card_use_approved"] is False
     assert receipt["toolchain"]["pdftotext_version"].startswith("pdftotext version ")
     assert len(receipt["toolchain"]["pdftotext_sha256"]) == 64
+    for name in ("acl_metadata_witness.v1.jsonl", "acl_metadata_projection.v1.jsonl"):
+        assert receipt["output_sha256"][name] == _sha((data["out"] / name).read_bytes())
     _assert_inputs_unchanged(data)
 
 
@@ -900,6 +902,72 @@ def test_output_write_failure_leaves_no_partial_final_directory(projection_input
     assert not data["out"].exists()
     staging = list(data["out"].parent.glob(f".{data['out'].name}.staging-*")) if data["out"].parent.exists() else []
     assert staging == []
+    _assert_inputs_unchanged(data)
+
+
+@pytest.mark.parametrize("output_name", [
+    "acl_metadata_witness.v1.jsonl", "acl_metadata_projection.v1.jsonl", "receipt.json",
+])
+def test_short_output_write_cannot_publish_success_receipt(projection_inputs, monkeypatch, output_name):
+    data = projection_inputs
+    original_open = Path.open
+
+    class ShortWriter:
+        def __init__(self, real):
+            self.real = real
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def __enter__(self):
+            return self
+
+        def write(self, payload):
+            self.real.write(payload[:1])
+            return 1
+
+        def __exit__(self, exc_type, exc, tb):
+            return self.real.__exit__(exc_type, exc, tb)
+
+    def open_with_short_write(path, mode="r", *args, **kwargs):
+        real = original_open(path, mode, *args, **kwargs)
+        if path.name == output_name and mode == "xb" and ".staging-" in path.parent.name:
+            return ShortWriter(real)
+        return real
+
+    monkeypatch.setattr(Path, "open", open_with_short_write)
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode != 0
+    assert "short output write" in result.stderr
+    assert not data["out"].exists()
+    assert list(data["out"].parent.glob(f".{data['out'].name}.staging-*")) == []
+    _assert_inputs_unchanged(data)
+
+
+@pytest.mark.parametrize("output_name", [
+    "acl_metadata_witness.v1.jsonl", "acl_metadata_projection.v1.jsonl", "receipt.json",
+])
+@pytest.mark.parametrize("fault", ["changed_bytes", "read_error"])
+def test_output_readback_fault_cannot_publish_success_receipt(projection_inputs, monkeypatch, output_name, fault):
+    data = projection_inputs
+    original_read = Path.read_bytes
+
+    def read_with_fault(path):
+        payload = original_read(path)
+        if path.name == output_name and ".staging-" in path.parent.name:
+            if fault == "read_error":
+                raise OSError("injected output readback failure")
+            return b"X" + payload[1:]
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", read_with_fault)
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode != 0
+    assert "output readback" in result.stderr
+    assert not data["out"].exists()
+    assert list(data["out"].parent.glob(f".{data['out'].name}.staging-*")) == []
     _assert_inputs_unchanged(data)
 
 

@@ -671,10 +671,18 @@ def build(args: argparse.Namespace) -> Path:
             ("receipt.json", receipt_bytes),
         )
         for name, data in files:
-            with (staging_dir / name).open("xb") as handle:
-                handle.write(data)
+            path = staging_dir / name
+            with path.open("xb") as handle:
+                if handle.write(data) != len(data):
+                    raise OSError(f"short output write: {name}")
                 handle.flush()
                 os.fsync(handle.fileno())
+            try:
+                actual = path.read_bytes()
+            except OSError as exc:
+                raise OSError(f"output readback failed: {name}: {exc}") from exc
+            if len(actual) != len(data) or _sha(actual) != _sha(data) or actual != data:
+                raise ValueError(f"output readback mismatch: {name}")
         # Same-parent rename publishes the complete run atomically. The staging
         # directory is nonempty, so a concurrent completed output is not replaced.
         os.rename(staging_dir, output_dir)
