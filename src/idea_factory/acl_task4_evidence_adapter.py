@@ -60,7 +60,11 @@ def load_task4_page1_witnesses(data: bytes) -> list[dict[str, Any]]:
             raise ValueError(f"Task 4 page1 line {line_number} must be a JSON object")
         item_id = row.get("item_id")
         if not isinstance(item_id, str) or not item_id:
-            raise ValueError(f"Task 4 page1 line {line_number} has no explicit item_id")
+            # Without a stable key there is no safe way to choose which selected
+            # item should receive a visible HOLD row; assigning one would guess.
+            raise ValueError(
+                f"Task 4 page1 line {line_number} has no explicit item_id; cannot safely assign evidence without guessing"
+            )
         if item_id in seen_item_ids:
             raise ValueError(f"duplicate Task 4 page1 item_id: {item_id}")
         seen_item_ids.add(item_id)

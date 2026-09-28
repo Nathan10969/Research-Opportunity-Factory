@@ -108,6 +108,23 @@ def test_supported_admission_projects_only_reviewed_metadata_and_preserves_queue
     assert result["graph_ingested"] is False
 
 
+@pytest.mark.parametrize("timestamp", ["2026-09-28T01:02:03Z", "2026-09-28T01:02:03+00:00"])
+def test_reviewed_at_utc_accepts_explicit_utc_timestamps(timestamp):
+    proof, page1, review = _fixture()
+    review["reviewed_at_utc"] = timestamp
+
+    assert validate_admission(proof, page1, review)["status"] == "SUPPORTED"
+
+
+@pytest.mark.parametrize("timestamp", ["yesterday", "2026-09-28", "2026-09-28T01:02:03", "2026-09-28T01:02:03-07:00"])
+def test_reviewed_at_utc_rejects_malformed_or_non_utc_timestamps(timestamp):
+    proof, page1, review = _fixture()
+    review["reviewed_at_utc"] = timestamp
+
+    with pytest.raises(ValueError, match="reviewed_at_utc must be an ISO-8601 UTC timestamp"):
+        validate_admission(proof, page1, review)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

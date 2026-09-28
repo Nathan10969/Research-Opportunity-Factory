@@ -576,7 +576,43 @@ def test_aggregate_task4_review_decision_cannot_substitute_for_exact_review_row(
     data["snapshots"][data["reviews_path"]] = _sha(data["reviews_path"].read_bytes())
     result = _run(data, mode="pilot-subset")
 
+    assert result.returncode == 0, result.stderr
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    diagnostic = [json.loads(line) for line in (data["out"] / "acl_metadata_witness.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(projection) == len(diagnostic) == 10
+    held = next(row for row in projection if row["item_id"] == TASK4_IDS[0])
+    assert held["status"] == "METADATA_HOLD"
+    assert held["hold_reason"] == "REVIEW_EXACT_RECORD_MISSING"
+    assert all(field["approved"] is None for field in held["fields"].values())
+    assert not any(row["item_id"] == TASK4_IDS[0] and row["status"] == "SUPPORTED" for row in projection)
+    _assert_inputs_unchanged(data)
+
+
+def test_duplicate_review_json_keys_are_rejected_before_any_output(projection_inputs):
+    data = projection_inputs
+    rows = data["reviews_path"].read_bytes().splitlines(keepends=True)
+    rows[0] = rows[0].replace(b'"decision":"SUPPORTED"', b'"decision":"METADATA_HOLD","decision":"SUPPORTED"')
+    data["reviews_path"].write_bytes(b"".join(rows))
+    data["snapshots"][data["reviews_path"]] = _sha(data["reviews_path"].read_bytes())
+
+    result = _run(data, mode="pilot-subset")
+
     assert result.returncode != 0
+    assert "duplicate JSON key" in result.stderr
+    assert not data["out"].exists()
+    _assert_inputs_unchanged(data)
+
+
+def test_page1_record_without_item_id_fails_without_guessing_selected_identity(projection_inputs):
+    data = projection_inputs
+    del data["page1_rows"][0]["item_id"]
+    _write_jsonl(data["page1_path"], data["page1_rows"])
+    data["snapshots"][data["page1_path"]] = _sha(data["page1_path"].read_bytes())
+
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode != 0
+    assert "cannot safely assign evidence without guessing" in result.stderr.lower()
     assert not data["out"].exists()
     _assert_inputs_unchanged(data)
 

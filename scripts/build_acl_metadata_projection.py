@@ -26,6 +26,11 @@ from idea_factory.acl_metadata_admission import validate_admission
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ACL_ITEM_ID_RE = re.compile(r"2026\.findings-acl\.\d+\Z")
 _FIELDS = ("title", "ordered_authors", "venue", "year")
+_EXACT_REVIEW_KEYS = {
+    "item_id", "proof_row_sha256", "pdf_sha256", "page1_text_sha256",
+    "decision", "reviewer_id", "reviewed_at_utc", "reason",
+    "native_pdf_identity_verified", "field_verdicts",
+}
 _RECEIPT_SCHEMA = "acl670_metadata_proof_only_run_receipt.v1"
 _REPARSE_POINT = 0x0400
 _PARENT_RECEIPT_RELATIVE_PATH = Path(
@@ -110,13 +115,22 @@ def _json_object_lines(data: bytes, label: str) -> list[dict]:
         if not raw.strip():
             raise ValueError(f"blank JSONL row in {label} at line {number}")
         try:
-            row = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            row = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_without_duplicate_keys)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError(f"invalid JSONL row in {label} at line {number}: {exc}") from exc
         if not isinstance(row, dict):
             raise ValueError(f"{label} line {number} must be a JSON object")
         rows.append(row)
     return rows
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
 
 def _unique_by_item(rows: list[dict], label: str) -> dict[str, dict]:
@@ -522,6 +536,8 @@ def build(args: argparse.Namespace) -> Path:
         if page1 is not None and page1.get("pdf_sha256") != proof.get("pdf_sha256"):
             raise ValueError(f"{item_id}: page1 PDF hash does not match the parent proof")
         if review is not None:
+            if set(review) != _EXACT_REVIEW_KEYS:
+                continue
             if review.get("pdf_sha256") != proof.get("pdf_sha256"):
                 raise ValueError(f"{item_id}: review PDF hash does not match the parent proof")
             if review.get("proof_row_sha256") != _canonical_sha(proof):
@@ -554,6 +570,8 @@ def build(args: argparse.Namespace) -> Path:
             projected = _hold_row(proof, page1_error, page1=page1, review=review)
         elif review is None:
             projected = _hold_row(proof, "REVIEW_MISSING", page1=page1)
+        elif set(review) != _EXACT_REVIEW_KEYS:
+            projected = _hold_row(proof, "REVIEW_EXACT_RECORD_MISSING", page1=page1, review=review)
         else:
             # A stale or malformed reviewer record is an input error, never a projection.
             projected = validate_admission(proof, page1, review)

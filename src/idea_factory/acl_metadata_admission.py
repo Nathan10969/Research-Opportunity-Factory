@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timedelta
 
 
 _PAGE1_KEYS = {
@@ -39,6 +40,19 @@ def _require_nonempty(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a nonempty string")
     return value
+
+
+def _require_utc_timestamp(value: object) -> str:
+    timestamp = _require_nonempty(value, "reviewed_at_utc")
+    if not (timestamp.endswith("Z") or timestamp.endswith("+00:00")):
+        raise ValueError("reviewed_at_utc must be an ISO-8601 UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp)
+    except ValueError as exc:
+        raise ValueError("reviewed_at_utc must be an ISO-8601 UTC timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError("reviewed_at_utc must be an ISO-8601 UTC timestamp")
+    return timestamp
 
 
 def validate_admission(proof: dict, page1: dict, review: dict) -> dict:
@@ -109,7 +123,7 @@ def validate_admission(proof: dict, page1: dict, review: dict) -> dict:
     reviewer_id = _require_nonempty(review["reviewer_id"], "reviewer ID")
     if reviewer_id == witness_author_id:
         raise ValueError("reviewer must differ from the page1 witness author")
-    _require_nonempty(review["reviewed_at_utc"], "reviewed_at_utc")
+    _require_utc_timestamp(review["reviewed_at_utc"])
     reason = _require_nonempty(review["reason"], "review reason")
     verdicts = review["field_verdicts"]
     if not isinstance(verdicts, dict) or set(verdicts) != set(_FIELD_NAMES):
