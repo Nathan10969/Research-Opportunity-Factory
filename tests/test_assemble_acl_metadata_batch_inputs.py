@@ -1,9 +1,11 @@
 """Contract tests for mechanical ACL witness/review batch custody."""
 
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -89,8 +91,59 @@ def test_assembles_raw_lines_in_batch_order_and_writes_nonapproval_receipt(tmp_p
     assert receipt["proof_id_set_covered"] is True
     assert receipt["review_authentication"] == "EXTERNAL_QA_REQUIRED"
     assert receipt["source_admission_approved"] is False
+    assert receipt["downstream_card_use_approved"] is False
     assert receipt["human_approved"] is False
     assert receipt["graph_ingested"] is False
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+@pytest.mark.parametrize("failure", ["write", "close"])
+def test_receipt_io_failure_never_publishes_success_receipt(tmp_path, monkeypatch, failure):
+    root, proof, proof_sha, manifest, _, sources, _ = _fixture(tmp_path)
+    before = {path: path.read_bytes() for path in sources}
+    output = root / "assembled"
+    spec = importlib.util.spec_from_file_location("acl_batch_assembler_for_fault_test", CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original_open = Path.open
+
+    class FaultyReceiptFile:
+        def __init__(self, real):
+            self.real = real
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def __enter__(self):
+            return self
+
+        def write(self, data):
+            if failure == "write":
+                self.real.write(data[:1])
+                raise OSError("injected receipt write failure")
+            return self.real.write(data)
+
+        def __exit__(self, exc_type, exc, tb):
+            self.real.__exit__(exc_type, exc, tb)
+            if failure == "close" and exc_type is None:
+                raise OSError("injected receipt close failure")
+
+    def open_with_fault(path, mode="r", *args, **kwargs):
+        real = original_open(path, mode, *args, **kwargs)
+        if path.name.startswith("receipt") and mode == "xb":
+            return FaultyReceiptFile(real)
+        return real
+
+    monkeypatch.setattr(Path, "open", open_with_fault)
+    args = Namespace(manifest=str(manifest), proof=str(proof), proof_sha256=proof_sha,
+                     corpus_root=str(root), output_dir=str(output), expected_batches=2,
+                     expected_total=20)
+
+    with pytest.raises(OSError, match="injected receipt"):
+        module.assemble(args)
+
+    assert output.is_dir()
+    assert not (output / "receipt.json").exists()
     assert all(path.read_bytes() == data for path, data in before.items())
 
 

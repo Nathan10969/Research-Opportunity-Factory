@@ -260,6 +260,7 @@ def assemble(args: argparse.Namespace) -> Path:
         "proof_id_set_covered": witness_ids == proof_ids,
         "review_authentication": "EXTERNAL_QA_REQUIRED",
         "source_admission_approved": False,
+        "downstream_card_use_approved": False,
         "human_approved": False,
         "graph_ingested": False,
         "overlay_is_approval": False,
@@ -269,8 +270,14 @@ def assemble(args: argparse.Namespace) -> Path:
         handle.write(page1_output)
     with (output / "reviews.v1.jsonl").open("xb") as handle:
         handle.write(review_output)
-    with (output / "receipt.json").open("xb") as handle:
-        handle.write((json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+    receipt_data = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    pending_receipt = output / "receipt.json.pending"
+    with pending_receipt.open("xb") as handle:
+        if handle.write(receipt_data) != len(receipt_data):
+            raise OSError("short receipt write")
+        handle.flush()
+        os.fsync(handle.fileno())
+    pending_receipt.rename(output / "receipt.json")
     return output
 
 
