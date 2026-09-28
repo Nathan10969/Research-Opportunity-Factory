@@ -101,6 +101,22 @@ def _write_jsonl(path: Path, rows) -> bytes:
     return data
 
 
+def _task4_page1_record(proof, text, text_bytes, version, index):
+    return {
+        "schema_version": "acl_metadata_page1_witness_input.v1",
+        "item_id": proof["item_id"],
+        "pdf": {"path": proof["pdf_path"], "sha256": proof["pdf_sha256"]},
+        "pdf_page1": {
+            "text": text,
+            "text_sha256": _sha(text_bytes),
+            "text_utf8_bytes": len(text_bytes),
+            "pdftotext_version": version,
+            "pdftotext_executable_sha256": "b" * 64,
+        },
+        "witness_author_id": f"builder-{index}",
+    }
+
+
 @pytest.fixture
 def projection_inputs(tmp_path):
     root = tmp_path / "corpus"
@@ -160,15 +176,13 @@ def projection_inputs(tmp_path):
     reviews = []
     for index, proof in enumerate(proofs[:10], 1):
         page1_text = extracted_pages[index - 1].decode("utf-8")
-        page1 = {
-            "item_id": proof["item_id"], "pdf_sha256": proof["pdf_sha256"],
-            "page1_text_sha256": _sha(extracted_pages[index - 1]), "page1_text": page1_text,
-            "pdftotext_version": pdftotext_version, "witness_author_id": f"builder-{index}",
-        }
+        page1 = _task4_page1_record(
+            proof, page1_text, extracted_pages[index - 1], pdftotext_version, index
+        )
         page1_rows.append(page1)
         reviews.append({
             "item_id": proof["item_id"], "proof_row_sha256": _sha(_json_bytes(proof)),
-            "pdf_sha256": proof["pdf_sha256"], "page1_text_sha256": page1["page1_text_sha256"],
+            "pdf_sha256": proof["pdf_sha256"], "page1_text_sha256": page1["pdf_page1"]["text_sha256"],
             "decision": "SUPPORTED", "reviewer_id": f"reviewer-{index}",
             "reviewed_at_utc": "2026-09-28T01:02:03Z", "reason": "Independent native page-1 identity confirmed.",
             "native_pdf_identity_verified": True,
@@ -341,6 +355,13 @@ def test_ten_id_subset_conserves_nine_supported_and_one_missing_review(projectio
     assert receipt["selected_row_count"] == receipt["output_row_count"] == 10
     assert receipt["selected_ids"] == expected_ids
     assert receipt["selection_list_sha256"] == _sha(data["selection_path"].read_bytes())
+    assert receipt["page1_adapter"]["protocol_version"] == "acl_task4_page1_normalization.v1"
+    assert receipt["page1_adapter"]["protocol_sha256"] == _sha(
+        (WORKTREE / "src" / "idea_factory" / "acl_task4_evidence_adapter.py").read_bytes()
+    )
+    assert receipt["page1_adapter"]["raw_input_path"] == str(data["page1_path"])
+    assert receipt["page1_adapter"]["raw_input_sha256"] == _sha(data["page1_path"].read_bytes())
+    assert len(receipt["page1_adapter"]["raw_input_row_sha256"]) == 10
     assert receipt["source_admission_approved"] is False
     assert receipt["human_approved"] is False
     assert receipt["graph_ingested"] is False
@@ -481,7 +502,7 @@ def test_evidence_id_outside_parent_is_rejected_without_output(projection_inputs
 def test_selected_evidence_with_wrong_hash_binding_is_rejected_before_output(projection_inputs, mismatch):
     data = projection_inputs
     if mismatch == "page1_pdf":
-        data["page1_rows"][0]["pdf_sha256"] = data["proofs"][1]["pdf_sha256"]
+        data["page1_rows"][0]["pdf"]["sha256"] = data["proofs"][1]["pdf_sha256"]
         path = data["page1_path"]
     elif mismatch == "review_pdf":
         data["reviews"][0]["pdf_sha256"] = data["proofs"][1]["pdf_sha256"]
@@ -518,6 +539,45 @@ def test_135_author_conflict_hold_remains_visible_in_subset_fixture(projection_i
     assert held["hold_reason"] == "Independent reviewer found author-order conflict."
     assert len(projection) == 10
     assert all(field["approved"] is None for field in held["fields"].values())
+    _assert_inputs_unchanged(data)
+
+
+def test_missing_nested_page1_field_becomes_item_visible_hold(projection_inputs):
+    data = projection_inputs
+    del data["page1_rows"][0]["witness_author_id"]
+    _write_jsonl(data["page1_path"], data["page1_rows"])
+    data["snapshots"][data["page1_path"]] = _sha(data["page1_path"].read_bytes())
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode == 0, result.stderr
+    diagnostic = [json.loads(line) for line in (data["out"] / "acl_metadata_witness.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    projection = [json.loads(line) for line in (data["out"] / "acl_metadata_projection.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    held = next(row for row in projection if row["item_id"] == TASK4_IDS[0])
+    raw = next(row for row in diagnostic if row["item_id"] == TASK4_IDS[0])
+    assert len(projection) == len(diagnostic) == 10
+    assert held["status"] == "METADATA_HOLD"
+    assert held["hold_reason"] == "PAGE1_WITNESS_AUTHOR_MISSING"
+    assert raw["page1_witness"] is None
+    assert raw["page1_witness_raw_sha256"] == _sha(
+        data["page1_path"].read_bytes().splitlines(keepends=True)[0]
+    )
+    _assert_inputs_unchanged(data)
+
+
+def test_aggregate_task4_review_decision_cannot_substitute_for_exact_review_row(projection_inputs):
+    data = projection_inputs
+    aggregate = {
+        "schema_version": "acl_metadata_independent_reviewer_decision.v1",
+        "item_id": TASK4_IDS[0],
+        "decision": "SUPPORTED_METADATA_EVIDENCE_ONLY",
+        "overall": "metadata evidence reviewed",
+    }
+    _write_jsonl(data["reviews_path"], [aggregate])
+    data["snapshots"][data["reviews_path"]] = _sha(data["reviews_path"].read_bytes())
+    result = _run(data, mode="pilot-subset")
+
+    assert result.returncode != 0
+    assert not data["out"].exists()
     _assert_inputs_unchanged(data)
 
 
@@ -624,10 +684,11 @@ def test_altered_queue_row_hash_is_rejected_without_success_receipt(projection_i
 def test_synthetic_unrelated_page1_text_cannot_be_supported_by_recomputed_hashes(projection_inputs):
     data = projection_inputs
     page1 = data["page1_rows"][0]
-    page1["page1_text"] = "UNRELATED DOCUMENT BY UNKNOWN AUTHORS / NOT ACL 2026"
-    page1["page1_text_sha256"] = _sha(page1["page1_text"].encode("utf-8"))
+    page1["pdf_page1"]["text"] = "UNRELATED DOCUMENT BY UNKNOWN AUTHORS / NOT ACL 2026"
+    page1["pdf_page1"]["text_sha256"] = _sha(page1["pdf_page1"]["text"].encode("utf-8"))
+    page1["pdf_page1"]["text_utf8_bytes"] = len(page1["pdf_page1"]["text"].encode("utf-8"))
     review = data["reviews"][0]
-    review["page1_text_sha256"] = page1["page1_text_sha256"]
+    review["page1_text_sha256"] = page1["pdf_page1"]["text_sha256"]
     review["native_pdf_identity_verified"] = True
     review["field_verdicts"] = {"title": "PASS", "ordered_authors": "PASS", "venue": "PASS", "year": "PASS"}
     page1_data = _write_jsonl(data["page1_path"], data["page1_rows"])
@@ -648,7 +709,7 @@ def test_synthetic_unrelated_page1_text_cannot_be_supported_by_recomputed_hashes
 
 def test_recorded_pdftotext_version_must_match_the_extractor(projection_inputs):
     data = projection_inputs
-    data["page1_rows"][0]["pdftotext_version"] = "pdftotext version 0.0.0-forged"
+    data["page1_rows"][0]["pdf_page1"]["pdftotext_version"] = "pdftotext version 0.0.0-forged"
     page1_data = _write_jsonl(data["page1_path"], data["page1_rows"])
     data["snapshots"][data["page1_path"]] = _sha(page1_data)
     result = _run(data)
@@ -670,7 +731,7 @@ def test_non_pdf_bytes_cannot_be_supported_even_when_all_declared_hashes_are_rec
     pdf_path = Path(proof["pdf_path"])
     pdf_path.write_bytes(b"not a PDF document")
     proof["pdf_sha256"] = _sha(pdf_path.read_bytes())
-    page1["pdf_sha256"] = proof["pdf_sha256"]
+    page1["pdf"]["sha256"] = proof["pdf_sha256"]
     review["pdf_sha256"] = proof["pdf_sha256"]
     review["proof_row_sha256"] = _sha(_json_bytes(proof))
     proof_data = _write_jsonl(data["proof_path"], data["proofs"])

@@ -14,6 +14,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from idea_factory import acl_task4_evidence_adapter
+from idea_factory.acl_task4_evidence_adapter import (
+    ADAPTER_PROTOCOL_VERSION,
+    load_task4_page1_witnesses,
+    normalize_task4_page1_witness,
+)
 from idea_factory.acl_metadata_admission import validate_admission
 
 
@@ -279,11 +285,19 @@ def _hold_row(proof: dict, reason: str, *, page1: dict | None = None, review: di
     return row
 
 
-def _diagnostic_row(proof: dict, page1: dict | None, review: dict | None, projection: dict) -> dict:
+def _diagnostic_row(
+    proof: dict,
+    page1: dict | None,
+    review: dict | None,
+    projection: dict,
+    *,
+    page1_raw_sha256: str | None = None,
+) -> dict:
     return {
         "item_id": proof["item_id"],
         "proof_row_sha256": _canonical_sha(proof),
         "page1_witness_sha256": _canonical_sha(page1) if page1 is not None else None,
+        "page1_witness_raw_sha256": page1_raw_sha256,
         "page1_witness": page1,
         "review_sha256": _canonical_sha(review) if review is not None else None,
         "review_reference": None if review is None else {
@@ -394,6 +408,9 @@ def build(args: argparse.Namespace) -> Path:
 
     snapshots: dict[Path, str] = {}
     pdftotext_path, pdftotext_sha256, pdftotext_version = _resolve_pdftotext(snapshots)
+    adapter_path = Path(acl_task4_evidence_adapter.__file__).resolve(strict=True)
+    adapter_sha256 = _sha(adapter_path.read_bytes())
+    snapshots[adapter_path] = adapter_sha256
     proof_sha = _digest_argument(args.proof_sha256, "proof hash")
     receipt_sha = _digest_argument(args.proof_receipt_sha256, "proof receipt hash")
     page1_sha = _digest_argument(args.page1_sha256, "page1 witnesses hash")
@@ -463,21 +480,42 @@ def build(args: argparse.Namespace) -> Path:
         if missing_parent_ids:
             raise ValueError(f"selected IDs are absent from the authoritative parent proof: {sorted(missing_parent_ids)}")
 
-    page1_by_id = _unique_by_item(_json_object_lines(page1_data, "page1 witnesses"), "page1 witness")
-    review_by_id = _unique_by_item(_json_object_lines(reviews_data, "reviews"), "review")
-    unknown_page1 = set(page1_by_id) - set(proof_by_id)
-    unknown_reviews = set(review_by_id) - set(proof_by_id)
-    if unknown_page1:
-        raise ValueError(f"page1 witnesses are broader than proof scope: {sorted(unknown_page1)}")
-    if unknown_reviews:
-        raise ValueError(f"reviews are broader than proof scope: {sorted(unknown_reviews)}")
-
     if selection_ids is not None:
         selected_proofs = {item_id: proof_by_id[item_id] for item_id in selection_ids}
     else:
         selected_proofs = proof_by_id
 
     _verify_proof_source_rows(proof_rows, root, snapshots)
+    raw_page1_rows = load_task4_page1_witnesses(page1_data)
+    raw_page1_by_id = _unique_by_item(raw_page1_rows, "Task 4 page1 witness")
+    raw_page1_lines = page1_data.splitlines(keepends=True)
+    if len(raw_page1_lines) != len(raw_page1_rows):
+        raise ValueError("Task 4 page1 JSONL row/byte-line count mismatch")
+    raw_page1_sha_by_id = {
+        row["item_id"]: _sha(raw_line)
+        for row, raw_line in zip(raw_page1_rows, raw_page1_lines, strict=True)
+    }
+    review_by_id = _unique_by_item(_json_object_lines(reviews_data, "reviews"), "review")
+    unknown_page1 = set(raw_page1_by_id) - set(proof_by_id)
+    unknown_reviews = set(review_by_id) - set(proof_by_id)
+    if unknown_page1:
+        raise ValueError(f"page1 witnesses are broader than proof scope: {sorted(unknown_page1)}")
+    if unknown_reviews:
+        raise ValueError(f"reviews are broader than proof scope: {sorted(unknown_reviews)}")
+
+    page1_by_id: dict[str, dict] = {}
+    page1_hold_reason_by_id: dict[str, str] = {}
+    for item_id in sorted(set(raw_page1_by_id).intersection(selected_proofs)):
+        normalized, hold_reason = normalize_task4_page1_witness(
+            raw_page1_by_id[item_id],
+            expected_item_id=item_id,
+            expected_pdf_sha256=selected_proofs[item_id]["pdf_sha256"],
+        )
+        if normalized is None:
+            page1_hold_reason_by_id[item_id] = hold_reason or "PAGE1_WITNESS_INVALID"
+        else:
+            page1_by_id[item_id] = normalized
+
     for item_id, proof in selected_proofs.items():
         page1 = page1_by_id.get(item_id)
         review = review_by_id.get(item_id)
@@ -492,17 +530,26 @@ def build(args: argparse.Namespace) -> Path:
                 raise ValueError(f"{item_id}: review page1 text hash does not match the page1 witness")
     projection_rows: list[dict] = []
     diagnostic_rows: list[dict] = []
+    page1_raw_row_sha256: dict[str, str | None] = {}
     for item_id in sorted(selected_proofs):
         proof = selected_proofs[item_id]
         page1 = page1_by_id.get(item_id)
+        page1_raw_sha = raw_page1_sha_by_id.get(item_id)
+        page1_raw_row_sha256[item_id] = page1_raw_sha
         review = review_by_id.get(item_id)
         page1_error = (
             _page1_verification_hold_reason(proof, page1, pdftotext_path, pdftotext_version)
             if page1 is not None
             else None
         )
-        if page1 is None:
+        if page1 is None and item_id not in raw_page1_by_id:
             projected = _hold_row(proof, "PAGE1_WITNESS_MISSING", review=review)
+        elif page1 is None:
+            projected = _hold_row(
+                proof,
+                page1_hold_reason_by_id[item_id],
+                review=review,
+            )
         elif page1_error is not None:
             projected = _hold_row(proof, page1_error, page1=page1, review=review)
         elif review is None:
@@ -514,7 +561,9 @@ def build(args: argparse.Namespace) -> Path:
         projected["review_authentication"] = "EXTERNAL_QA_REQUIRED"
         projected["downstream_card_use_approved"] = False
         projection_rows.append(projected)
-        diagnostic_rows.append(_diagnostic_row(proof, page1, review, projected))
+        diagnostic_rows.append(
+            _diagnostic_row(proof, page1, review, projected, page1_raw_sha256=page1_raw_sha)
+        )
 
     expected_output_count = 10 if args.mode == "pilot-subset" else 670
     if len(projection_rows) != expected_output_count or len(diagnostic_rows) != expected_output_count:
@@ -574,6 +623,13 @@ def build(args: argparse.Namespace) -> Path:
             "proof_receipt": receipt_sha,
             "page1_witnesses": page1_sha,
             "reviews": reviews_sha,
+        },
+        "page1_adapter": {
+            "protocol_version": ADAPTER_PROTOCOL_VERSION,
+            "protocol_sha256": adapter_sha256,
+            "raw_input_path": str(page1_path),
+            "raw_input_sha256": page1_sha,
+            "raw_input_row_sha256": page1_raw_row_sha256,
         },
         "pinned_files_sha256": {
             str(path): digest for path, digest in sorted(snapshots.items(), key=lambda pair: str(pair[0]))
