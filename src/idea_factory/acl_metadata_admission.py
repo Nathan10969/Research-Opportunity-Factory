@@ -76,6 +76,10 @@ def validate_admission(proof: dict, page1: dict, review: dict) -> dict:
     year = section.get("year")
     if not isinstance(year, int) or isinstance(year, bool):
         raise ValueError("official witness year must be an integer")
+    id_year = int(item_id[:4])
+    section_text_years = re.findall(r"(?<!\d)\d{4}(?!\d)", venue)
+    if year != id_year or len(section_text_years) != 1 or int(section_text_years[0]) != id_year:
+        raise ValueError("official witness section year must unambiguously match the canonical ACL item ID year")
 
     pdf_sha256 = _require_sha256(proof.get("pdf_sha256"), "proof PDF hash")
     _require_nonempty(proof.get("pdf_path"), "proof PDF path")

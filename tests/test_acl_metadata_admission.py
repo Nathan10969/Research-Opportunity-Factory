@@ -225,3 +225,12 @@ def test_pdf_path_must_exist_in_proof_before_supported_projection():
 
     with pytest.raises(ValueError):
         validate_admission(proof, page1, review)
+
+
+def test_supported_admission_rejects_section_year_conflicting_with_exact_item_id():
+    proof, page1, review = _fixture()
+    proof["official_html_witness"]["publication_section_witness"]["year"] = 2025
+    review["proof_row_sha256"] = _canonical_sha256(proof)
+
+    with pytest.raises(ValueError):
+        validate_admission(proof, page1, review)
