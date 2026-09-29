@@ -1,8 +1,9 @@
 """Aggregate pinned, privately QA-passed RouterResult rows without ingesting them.
 
-Inputs are a frozen allowlist and a new run's router_jobs.jsonl. Every source
-result is copied byte-for-byte from its pinned physical JSONL row; this module
-does not call a model, fetch sources, or write into either run.
+Inputs are a frozen allowlist and a new run's router_jobs.jsonl. Strict v3
+source rows are copied byte-for-byte; a pinned legacy row with only a verified
+canonical-result hash envelope is stripped to strict v3 and its original
+physical row remains in provenance. No model, source fetch, or run write occurs.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .corpus import RouterResult
+from .corpus import RouterResult, _canonical_result_hash
 
 
 SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -117,6 +118,23 @@ def _write_new(path: Path, data: bytes) -> None:
         raise OSError(f"write readback mismatch: {path}")
 
 
+def adapt_legacy_router_envelope(result: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Strip only a verified canonical RouterResult hash, never scientific fields."""
+    required = set(RouterResult.model_fields)
+    keys = set(result)
+    if keys == required:
+        RouterResult.model_validate(result)
+        return result, None
+    if keys != required | {"raw_result_sha256"}:
+        raise ValueError("extra or missing RouterResult envelope keys")
+    provenance = result["raw_result_sha256"]
+    body = {key: value for key, value in result.items() if key != "raw_result_sha256"}
+    parsed = RouterResult.model_validate(body)
+    if type(provenance) is not str or provenance != _canonical_result_hash(parsed):
+        raise ValueError("legacy RouterResult canonical hash mismatch")
+    return body, provenance
+
+
 def aggregate(allowlist: Path, allowlist_sha256: str, router_jobs: Path,
               router_jobs_sha256: str, output_dir: Path) -> dict[str, Any]:
     """Preflight the exact job set and every pin, then publish a private snapshot."""
@@ -171,16 +189,21 @@ def aggregate(allowlist: Path, allowlist_sha256: str, router_jobs: Path,
                                     row["private_router_result_row_sha256"])
         if result.get("schema_version") != RESULT_SCHEMA:
             raise ValueError(f"not a v3 RouterResult: {row['slug']}")
-        RouterResult.model_validate(result)
-        if any(result.get(key) != value for key, value in binding.items()
+        adapted, legacy_hash = adapt_legacy_router_envelope(result)
+        if "legacy_router_canonical_sha256" in row and row["legacy_router_canonical_sha256"] != legacy_hash:
+            raise ValueError(f"legacy RouterResult provenance pin mismatch: {row['slug']}")
+        if any(adapted.get(key) != value for key, value in binding.items()
                if key in {"job_id", "slug", "note_sha256", "prompt_sha256"}):
             raise ValueError(f"old result binding mismatch: {row['slug']}")
-        candidate_rows.append(raw + b"\n")
+        candidate_rows.append((raw if legacy_hash is None else
+                               json.dumps(adapted, ensure_ascii=False, allow_nan=False,
+                                          sort_keys=True, separators=(",", ":")).encode("utf-8")) + b"\n")
         custody.append({"job_id": job["job_id"], "slug": row["slug"],
                         "source_path": row["private_router_result_path"],
                         "source_file_sha256": row["private_router_result_file_sha256"],
                         "source_line": row["private_router_result_line"],
                         "source_row_sha256": row["private_router_result_row_sha256"],
+                        "legacy_router_canonical_sha256": legacy_hash,
                         "qa_path": row["private_qa_path"], "qa_sha256": row["private_qa_sha256"],
                         "qa_scope": row["private_qa_scope"]})
     # Detect drift from concurrent modification before any output is published.

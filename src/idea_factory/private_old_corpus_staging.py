@@ -15,8 +15,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .corpus import CorpusRouterConfig, RouterResult, enumerate_candidates, _load_primary_source_manifest
-from .private_router_aggregate import _json, _lines, _physical_row, _pinned, _sha, _write_new
+from .corpus import CorpusRouterConfig, enumerate_candidates, _load_primary_source_manifest
+from .private_router_aggregate import (
+    _json, _lines, _physical_row, _pinned, _sha, _write_new,
+    adapt_legacy_router_envelope,
+)
 
 
 POSITION_LINES = re.compile(r"^- Shard ([1-5]) [^:]+: `([0-9, -]+)`\.$", re.M)
@@ -394,8 +397,9 @@ def _pinned_row(row: dict[str, Any], shard_path: Path, shard_sha: str,
             "prompt_sha256": row["prompt_sha256"],
         }.items()):
             continue
-        RouterResult.model_validate(body)
-        result = {**result, "result_count": len(_lines(Path(result["path"]).read_bytes()))}
+        _, legacy_hash = adapt_legacy_router_envelope(body)
+        result = {**result, "result_count": len(_lines(Path(result["path"]).read_bytes())),
+                  "legacy_router_canonical_sha256": legacy_hash}
         matched_candidates.append(result)
         for qa in qa_by_hash.get(result["file_sha256"], []):
             relevant_reports[qa["path"]] = qa
@@ -433,6 +437,7 @@ def _pinned_row(row: dict[str, Any], shard_path: Path, shard_sha: str,
         "private_router_result_file_sha256": selected["file_sha256"],
         "private_router_result_line": selected["line"],
         "private_router_result_row_sha256": selected["row_sha256"],
+        "legacy_router_canonical_sha256": selected["legacy_router_canonical_sha256"],
         "private_qa_path": qa["path"], "private_qa_sha256": qa["sha256"],
         "private_qa_scope": "PASS",
         "current_card_status": row["current_card_status"],

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from idea_factory.private_router_aggregate import aggregate
+from idea_factory.corpus import RouterResult, _canonical_result_hash
 
 
 def _sha(data: bytes) -> str:
@@ -86,6 +87,7 @@ def test_aggregates_exact_pinned_results_without_editing_inputs(tmp_path: Path) 
     assert receipt["candidate_count"] == 2
     assert receipt["candidate_sha256"] == _sha(candidate)
     assert [json.loads(line)["slug"] for line in candidate.splitlines()] == ["paper-a", "paper-b"]
+    assert candidate == b"".join(Path(row["private_router_result_path"]).read_bytes() for row in rows)
     assert all(p.read_bytes() == data for p, data in before.items())
     assert receipt["ingested"] is False and receipt["scientific_approval"] is False
 
@@ -145,5 +147,40 @@ def test_qa_slug_mention_without_pass_is_not_approval(tmp_path: Path) -> None:
     rows[0]["private_qa_sha256"] = _sha(qa.read_bytes())
     _jsonl(allowlist, rows)
     with pytest.raises(ValueError, match="QA is not PASS"):
+        _run(allowlist, jobs, output)
+    assert not output.exists()
+
+
+def test_legacy_canonical_hash_moves_to_provenance_without_changing_science(tmp_path: Path) -> None:
+    allowlist, jobs, output, rows = _fixture(tmp_path)
+    path = Path(rows[0]["private_router_result_path"])
+    original = json.loads(path.read_text())
+    legacy_hash = _canonical_result_hash(RouterResult.model_validate(original))
+    _jsonl(path, [{**original, "raw_result_sha256": legacy_hash}])
+    rows[0]["private_router_result_file_sha256"] = _sha(path.read_bytes())
+    rows[0]["private_router_result_row_sha256"] = _sha(path.read_bytes()[:-1])
+    _jsonl(allowlist, rows)
+    receipt = _run(allowlist, jobs, output)
+    candidate = json.loads((output / "router_results.candidate.v3.jsonl").read_text().splitlines()[0])
+    assert candidate == original
+    assert receipt["custody"][0]["legacy_router_canonical_sha256"] == legacy_hash
+    assert receipt["custody"][0]["source_row_sha256"] == rows[0]["private_router_result_row_sha256"]
+
+
+@pytest.mark.parametrize("change", ["wrong_hash", "other_extra_key"])
+def test_legacy_adapter_rejects_wrong_hash_or_any_other_extra_key(tmp_path: Path, change: str) -> None:
+    allowlist, jobs, output, rows = _fixture(tmp_path)
+    path = Path(rows[0]["private_router_result_path"])
+    original = json.loads(path.read_text())
+    value = {**original, "raw_result_sha256": _canonical_result_hash(RouterResult.model_validate(original))}
+    if change == "wrong_hash":
+        value["raw_result_sha256"] = "0" * 64
+    else:
+        value["unrelated"] = "not allowed"
+    _jsonl(path, [value])
+    rows[0]["private_router_result_file_sha256"] = _sha(path.read_bytes())
+    rows[0]["private_router_result_row_sha256"] = _sha(path.read_bytes()[:-1])
+    _jsonl(allowlist, rows)
+    with pytest.raises(ValueError, match="legacy|extra"):
         _run(allowlist, jobs, output)
     assert not output.exists()
