@@ -86,27 +86,6 @@ def _physical_row(data: bytes, number: int, digest: str) -> tuple[bytes, dict[st
     return row, _json(row)
 
 
-def _qa_pass(qa: dict[str, Any], slug: str) -> bool:
-    gates = [qa.get(key) for key in ("verdict", "disposition", "status", "qa_verdict")]
-    top_pass = any(isinstance(gate, str) and gate.startswith("PASS") for gate in gates)
-    item_seen = False
-    for key in ("per_item", "items", "item_dispositions", "per_result"):
-        items = qa.get(key)
-        if isinstance(items, dict):
-            items = list(items.values())
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if isinstance(item, dict) and item.get("slug") == slug:
-                disposition = next((item.get(name) for name in ("status", "verdict", "disposition")
-                                    if isinstance(item.get(name), str)), None)
-                if disposition is not None and not disposition.startswith("PASS"):
-                    return False
-                if disposition is not None:
-                    item_seen = True
-    return top_pass or item_seen
-
-
 def _write_new(path: Path, data: bytes) -> None:
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o600)
     with os.fdopen(fd, "wb") as handle:
@@ -138,6 +117,10 @@ def adapt_legacy_router_envelope(result: dict[str, Any]) -> tuple[dict[str, Any]
 def aggregate(allowlist: Path, allowlist_sha256: str, router_jobs: Path,
               router_jobs_sha256: str, output_dir: Path) -> dict[str, Any]:
     """Preflight the exact job set and every pin, then publish a private snapshot."""
+    # The staging module imports this module's pin helpers; defer this shared
+    # QA contract import until the aggregate call to avoid a module cycle.
+    from .private_old_corpus_staging import qa_binds_result
+
     allowlist, router_jobs, output_dir = Path(allowlist), Path(router_jobs), Path(output_dir)
     allowed = [_json(line) for line in _lines(_pinned(allowlist, allowlist_sha256))]
     jobs = [_json(line) for line in _lines(_pinned(router_jobs, router_jobs_sha256))]
@@ -181,12 +164,13 @@ def aggregate(allowlist: Path, allowlist_sha256: str, router_jobs: Path,
         if any(old_job.get(key) != value for key, value in binding.items()):
             raise ValueError(f"old job binding mismatch: {row['slug']}")
         qa = _json(_pinned(Path(row["private_qa_path"]), row["private_qa_sha256"]))
-        if not _qa_pass(qa, row["slug"]):
-            raise ValueError(f"old QA is not PASS for {row['slug']}")
         source_data = _pinned(Path(row["private_router_result_path"]),
                               row["private_router_result_file_sha256"])
         raw, result = _physical_row(source_data, row["private_router_result_line"],
                                     row["private_router_result_row_sha256"])
+        if not qa_binds_result(qa, row["private_router_result_file_sha256"],
+                               row["slug"], result_count=len(_lines(source_data))):
+            raise ValueError(f"old QA is not PASS for {row['slug']}")
         if result.get("schema_version") != RESULT_SCHEMA:
             raise ValueError(f"not a v3 RouterResult: {row['slug']}")
         adapted, legacy_hash = adapt_legacy_router_envelope(result)

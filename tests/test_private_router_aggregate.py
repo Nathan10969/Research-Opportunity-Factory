@@ -47,7 +47,8 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, list[dict]]:
         old_job_bytes = _jsonl(old_job, [job])
         result_bytes = _jsonl(old_result, [result])
         qa = old / f"{slug}.qa.json"
-        qa.write_text(json.dumps({"verdict": "PASS_PRIVATE_ONLY", "per_item":
+        qa.write_text(json.dumps({"verdict": "PASS_PRIVATE_ONLY",
+                                   "batch": {"results_sha256": _sha(result_bytes)}, "per_item":
                                    [{"slug": slug, "status": "PASS"}]}) + "\n")
         allow.append({"schema_version": "engineering.old811_card_pilot100_strict_v3_input_allowlist.v1",
                       "ordinal": index, "slug": slug,
@@ -75,6 +76,14 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, list[dict]]:
 def _run(allowlist: Path, jobs: Path, output: Path):
     return aggregate(allowlist, _sha(allowlist.read_bytes()),
                      jobs, _sha(jobs.read_bytes()), output)
+
+
+def _repin_qa_result(row: dict) -> None:
+    qa_path = Path(row["private_qa_path"])
+    qa = json.loads(qa_path.read_text())
+    qa["batch"]["results_sha256"] = row["private_router_result_file_sha256"]
+    qa_path.write_text(json.dumps(qa) + "\n")
+    row["private_qa_sha256"] = _sha(qa_path.read_bytes())
 
 
 def test_aggregates_exact_pinned_results_without_editing_inputs(tmp_path: Path) -> None:
@@ -151,6 +160,32 @@ def test_qa_slug_mention_without_pass_is_not_approval(tmp_path: Path) -> None:
     assert not output.exists()
 
 
+def test_itemized_findings_with_exact_result_pin_is_qa_pass(tmp_path: Path) -> None:
+    allowlist, jobs, output, rows = _fixture(tmp_path)
+    qa = Path(rows[0]["private_qa_path"])
+    qa.write_text(json.dumps({"pinned_artifacts": {"results": {
+        "sha256": rows[0]["private_router_result_file_sha256"], "rows": 1}},
+        "itemized_findings": [{"slug": rows[0]["slug"], "status": "PASS"}],
+        "disposition": "BATCH_013_QA_PASS_PENDING_ROOT_ACCEPTANCE"}) + "\n")
+    rows[0]["private_qa_sha256"] = _sha(qa.read_bytes())
+    _jsonl(allowlist, rows)
+    receipt = _run(allowlist, jobs, output)
+    assert receipt["candidate_count"] == 2
+
+
+def test_qa_pass_with_wrong_result_file_hash_fails_closed(tmp_path: Path) -> None:
+    allowlist, jobs, output, rows = _fixture(tmp_path)
+    qa = Path(rows[0]["private_qa_path"])
+    qa.write_text(json.dumps({"verdict": "PASS_PRIVATE_ONLY",
+        "batch": {"results_sha256": "0" * 64},
+        "per_item": [{"slug": rows[0]["slug"], "status": "PASS"}]}) + "\n")
+    rows[0]["private_qa_sha256"] = _sha(qa.read_bytes())
+    _jsonl(allowlist, rows)
+    with pytest.raises(ValueError, match="QA is not PASS"):
+        _run(allowlist, jobs, output)
+    assert not output.exists()
+
+
 def test_legacy_canonical_hash_moves_to_provenance_without_changing_science(tmp_path: Path) -> None:
     allowlist, jobs, output, rows = _fixture(tmp_path)
     path = Path(rows[0]["private_router_result_path"])
@@ -159,6 +194,7 @@ def test_legacy_canonical_hash_moves_to_provenance_without_changing_science(tmp_
     _jsonl(path, [{**original, "raw_result_sha256": legacy_hash}])
     rows[0]["private_router_result_file_sha256"] = _sha(path.read_bytes())
     rows[0]["private_router_result_row_sha256"] = _sha(path.read_bytes()[:-1])
+    _repin_qa_result(rows[0])
     _jsonl(allowlist, rows)
     receipt = _run(allowlist, jobs, output)
     candidate = json.loads((output / "router_results.candidate.v3.jsonl").read_text().splitlines()[0])
@@ -180,6 +216,7 @@ def test_legacy_adapter_rejects_wrong_hash_or_any_other_extra_key(tmp_path: Path
     _jsonl(path, [value])
     rows[0]["private_router_result_file_sha256"] = _sha(path.read_bytes())
     rows[0]["private_router_result_row_sha256"] = _sha(path.read_bytes()[:-1])
+    _repin_qa_result(rows[0])
     _jsonl(allowlist, rows)
     with pytest.raises(ValueError, match="legacy|extra"):
         _run(allowlist, jobs, output)
