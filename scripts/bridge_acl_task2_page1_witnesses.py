@@ -33,6 +33,14 @@ _FLAT_KEYS = frozenset({
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REPARSE_POINT = 0x0400
 _OUTPUT_NAME = "page1-witnesses.task4-compatible.v1.jsonl"
+_AUTHORITATIVE_INPUT_PATH = Path(
+    r"F:\LLM_Evoke\runs\parallel24-20260927-1340\engineering\acl-page1-lexical-bridge-670-20260928-v1\page1-witnesses.adapter-safe.v1.jsonl"
+)
+_AUTHORITATIVE_INPUT_SHA256 = "53123ef352929e9e5601ae0379400a9d8e763dd1f7540f9487c49ad725e4e05a"
+_AUTHORITATIVE_PROOF_PATH = Path(
+    r"F:\LLM_Evoke\runs\parallel24-20260927-1340\engineering\acl670-metadata-witness-proofonly-v5-20260927\acl_metadata_witness.jsonl"
+)
+_AUTHORITATIVE_PROOF_SHA256 = "375b75a511042b5e617a69649814d4c599a9b5d6a411d8f076c13ac48796cb8a"
 
 
 def _sha(data: bytes) -> str:
@@ -111,6 +119,10 @@ def _inside(value: str | Path, root: Path, label: str) -> Path:
     return path
 
 
+def _normalized_path(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
 def _read_pinned(path: Path, expected: str, label: str) -> bytes:
     _reject_reparse(path)
     data = path.read_bytes()
@@ -161,6 +173,10 @@ def bridge(args: argparse.Namespace) -> Path:
         raise ValueError("expected-count must be exactly 670")
     input_sha = _digest(args.input_sha256, "input-sha256")
     proof_sha = _digest(args.proof_sha256, "proof-sha256")
+    if input_sha != _AUTHORITATIVE_INPUT_SHA256:
+        raise ValueError("input hash differs from authoritative frozen pin")
+    if proof_sha != _AUTHORITATIVE_PROOF_SHA256:
+        raise ValueError("proof hash differs from authoritative frozen pin")
     root = Path(args.corpus_root)
     if not root.is_absolute() or not root.is_dir():
         raise ValueError("corpus root must be an existing absolute directory")
@@ -168,6 +184,10 @@ def bridge(args: argparse.Namespace) -> Path:
     _reject_reparse(root)
     source = _inside(args.input, root, "input")
     proof_path = _inside(args.proof, root, "proof")
+    if _normalized_path(source) != _normalized_path(_AUTHORITATIVE_INPUT_PATH):
+        raise ValueError("authoritative input path mismatch")
+    if _normalized_path(proof_path) != _normalized_path(_AUTHORITATIVE_PROOF_PATH):
+        raise ValueError("authoritative proof path mismatch")
     output_dir = _inside(args.output_dir, root, "output directory")
     if output_dir.exists():
         raise ValueError(f"output directory already exists: {output_dir}")

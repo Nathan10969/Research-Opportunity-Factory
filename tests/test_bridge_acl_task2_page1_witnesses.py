@@ -7,7 +7,10 @@ import os
 import subprocess
 import sys
 from argparse import Namespace
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -78,21 +81,64 @@ def bridge_inputs(tmp_path):
             "raw_lines": raw_lines, "ids": ids, "out": root / "bridged"}
 
 
-def _run(data, **overrides):
-    args = [sys.executable, str(CLI), "--input", str(data["source"]),
+def _cli_args(data, **overrides):
+    return ["--input", str(overrides.get("input_path", data["source"])),
             "--input-sha256", overrides.get("input_sha", data["source_sha"]),
-            "--proof", str(data["proof"]), "--proof-sha256", overrides.get("proof_sha", data["proof_sha"]),
+            "--proof", str(overrides.get("proof_path", data["proof"])),
+            "--proof-sha256", overrides.get("proof_sha", data["proof_sha"]),
             "--corpus-root", str(data["root"]), "--output-dir", str(data["out"]),
             "--expected-count", "670"]
+
+
+def _run_public(data, **overrides):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(WORKTREE / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    return subprocess.run(args, cwd=WORKTREE, env=env, capture_output=True, text=True)
+    return subprocess.run([sys.executable, str(CLI), *_cli_args(data, **overrides)],
+                          cwd=WORKTREE, env=env, capture_output=True, text=True)
 
 
-def _module():
+def _run(data, **overrides):
+    module = _module(data)
+    stdout, stderr = StringIO(), StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        code = module.main(_cli_args(data, **overrides))
+    return SimpleNamespace(returncode=code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
+
+
+def test_production_cli_rejects_self_consistent_synthetic_sources(bridge_inputs):
+    data = bridge_inputs
+    result = _run_public(data)
+
+    assert result.returncode != 0
+    assert "authoritative" in result.stderr.lower()
+    assert not data["out"].exists()
+    assert data["source"].read_bytes() == data["source_bytes"]
+    assert data["proof"].read_bytes() == data["proof_bytes"]
+
+
+@pytest.mark.parametrize("target", ["input", "proof"])
+def test_same_bytes_at_alias_path_are_not_authoritative(bridge_inputs, target):
+    data = bridge_inputs
+    original = data["source"] if target == "input" else data["proof"]
+    alias = data["root"] / f"alias-{target}.jsonl"
+    alias.write_bytes(original.read_bytes())
+
+    result = _run(data, **{f"{target}_path": alias})
+
+    assert result.returncode != 0
+    assert f"authoritative {target} path" in result.stderr.lower()
+    assert not data["out"].exists()
+
+
+def _module(data=None):
     spec = importlib.util.spec_from_file_location("acl_task2_bridge_test", CLI)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if data is not None:
+        module._AUTHORITATIVE_INPUT_PATH = data["source"]
+        module._AUTHORITATIVE_INPUT_SHA256 = data["source_sha"]
+        module._AUTHORITATIVE_PROOF_PATH = data["proof"]
+        module._AUTHORITATIVE_PROOF_SHA256 = data["proof_sha"]
     return module
 
 
@@ -149,8 +195,8 @@ def test_only_ten_exact_flat_ids_are_converted_and_660_raw_lines_survive(bridge_
 
 
 @pytest.mark.parametrize("mutation,expected", [
-    ("wrong_input_pin", "input hash mismatch"),
-    ("wrong_proof_pin", "proof hash mismatch"),
+    ("wrong_input_pin", "authoritative frozen pin"),
+    ("wrong_proof_pin", "authoritative frozen pin"),
     ("wrong_proof_count", "exactly 670"),
     ("duplicate_proof_id", "duplicate"),
     ("missing_flat", "flat ID set"),
@@ -236,7 +282,7 @@ def test_existing_output_is_untouched(bridge_inputs):
 @pytest.mark.parametrize("target", [OUTPUT_NAME, "receipt.json"])
 def test_short_staged_write_leaves_no_published_output(bridge_inputs, monkeypatch, target):
     data = bridge_inputs
-    module = _module()
+    module = _module(data)
     original_open = Path.open
 
     class ShortWriter:
@@ -272,7 +318,7 @@ def test_short_staged_write_leaves_no_published_output(bridge_inputs, monkeypatc
 
 def test_staged_readback_corruption_leaves_no_published_output(bridge_inputs, monkeypatch):
     data = bridge_inputs
-    module = _module()
+    module = _module(data)
     original_read = Path.read_bytes
 
     def corrupt_staged_read(path):
