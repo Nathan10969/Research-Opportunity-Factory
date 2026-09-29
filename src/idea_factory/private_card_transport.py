@@ -206,7 +206,6 @@ def transport(run: Path, allowlist: Path, allowlist_sha256: str, output_dir: Pat
         raise ValueError("allowlist does not exactly cover jobs")
     by_job = {job["job_id"]: job for job in jobs}
     seen_jobs: set[str] = set()
-    input_pins: list[dict[str, str]] = [*pinned]
     ready: list[dict[str, Any]] = []
     ledger: list[dict[str, Any]] = []
     card_ids: set[str] = set()
@@ -219,11 +218,10 @@ def transport(run: Path, allowlist: Path, allowlist_sha256: str, output_dir: Pat
             raise ValueError("allowlist job or science gate mismatch")
         expected_paths = {"note": Path(job["note_path"])}
         data: dict[str, bytes] = {}
-        for name in ("old_raw", "old_task", "old_review", "old_schema_validated", "note", "prompt", "pdf"):
-            data[name] = _read_pin(row[name], expected=expected_paths.get(name))
-            input_pins.append(row[name])
         status, reason, body_hash = "READY", "", None
         try:
+            for name in ("old_raw", "old_task", "old_review", "old_schema_validated", "note", "prompt", "pdf"):
+                data[name] = _read_pin(row[name], expected=expected_paths.get(name))
             wrapper, body_hash = _check_row(row, job, by_slug[job["slug"]], data)
             for card in wrapper["cards"]:
                 card_id = card["card_id"]
@@ -234,18 +232,30 @@ def transport(run: Path, allowlist: Path, allowlist_sha256: str, output_dir: Pat
                 status, reason = "HOLD", row["science_hold_reason"]
             else:
                 ready.append(wrapper)
-        except (ValueError, TypeError, KeyError) as exc:
+        except (ValueError, TypeError, KeyError, OSError, AttributeError) as exc:
             status, reason = "HOLD", str(exc)
         ledger.append({"job_id": job["job_id"], "slug": job["slug"], "status": status,
                        "reason": reason, "science_gate": row["science_gate"],
                        "card_body_sha256": body_hash,
-                       "input_pins": {name: row[name] for name in data}})
+                       "input_pins": {name: row[name] for name in ("old_raw", "old_task", "old_review", "old_schema_validated", "note", "prompt", "pdf")}})
     if seen_jobs != set(by_job):
         raise ValueError("allowlist job set mismatch")
     if _sha(allowlist.read_bytes()) != allowlist_sha256:
         raise ValueError("allowlist drift before output")
-    for pin in input_pins:
+    for pin in pinned:
         _read_pin(pin)
+    ready_by_job = {wrapper["job_id"]: wrapper for wrapper in ready}
+    for entry in ledger:
+        if entry["status"] != "READY":
+            continue
+        try:
+            for name, pin in entry["input_pins"].items():
+                _read_pin(pin, expected=Path(by_job[entry["job_id"]]["note_path"]) if name == "note" else None)
+        except (ValueError, TypeError, OSError) as exc:
+            entry["status"] = "HOLD"
+            entry["reason"] = f"pin drift before publish: {exc}"
+            ready_by_job.pop(entry["job_id"])
+    ready = [wrapper for wrapper in ready if wrapper["job_id"] in ready_by_job]
     output_dir = Path(output_dir)
     if output_dir.exists():
         raise FileExistsError(output_dir)

@@ -24,50 +24,52 @@ def _pin(path: Path) -> dict[str, str]:
     return {"path": str(path.resolve()), "sha256": _sha(path)}
 
 
-def _fixture(tmp_path: Path, *, hold: bool = False) -> tuple[Path, Path, Path, dict]:
-    jobs_path, jobs = _job_bundle(tmp_path)
-    job = jobs[0]
+def _fixture(tmp_path: Path, *, hold: bool = False, names: tuple[str, ...] = ("alpha",)) -> tuple[Path, Path, Path, dict]:
+    jobs_path, jobs = _job_bundle(tmp_path, names)
     run = jobs_path.parent.parent
-    pdf = tmp_path / "source.pdf"
-    pdf.write_bytes(b"%PDF-1.4\nsource\n")
-    old_dir = tmp_path / "old"
-    old_dir.mkdir()
-    old_prompt = old_dir / "paper_card.md"
-    old_prompt.write_bytes(Path(job["prompt_path"]).read_bytes())
-    card = _card(job)
-    raw = _write(old_dir / "raw.json", {
-        "schema_version": "idea_factory.bulk_card_response.v1", "slug": "worker-" + job["slug"],
-        "note_sha256": job["note_sha256"], "prompt_sha256": job["prompt_sha256"],
-        "cards": [card], "empty_reason": "",
-    })
-    task = _write(old_dir / "task.json", {
-        "slug": "worker-" + job["slug"], "shard_id": "worker", "note_path": job["note_path"],
-        "note_sha256": job["note_sha256"], "prompt_path": str(old_prompt),
-        "prompt_sha256": job["prompt_sha256"], "source_pdf_path": str(pdf.resolve()),
-        "source_pdf_sha256": _sha(pdf), "output_path": str(raw.resolve()), "card_id": card["card_id"],
-        "source_aliases": [{"arxiv_id": "testv1"}],
-    })
-    review = _write(old_dir / "review.json", {
-        "raw_path": str(raw.resolve()), "raw_sha256": _sha(raw),
-        "note_path": job["note_path"], "note_sha256": job["note_sha256"],
-        "source_pdf": {"path": str(pdf.resolve()), "sha256": _sha(pdf)},
-        "terminal_disposition": "SCHEMA_VALID",
-    })
-    validated = _write(old_dir / "schema_validated.json", {
-        "schema_version": "idea_factory.bulk_schema_validated_card.v1", "card": card,
-        "slug": "worker-" + job["slug"], "note_path": job["note_path"],
-        "note_sha256": job["note_sha256"], "prompt_sha256": job["prompt_sha256"],
-        "raw_result_sha256": _sha(raw), "record_id": card["card_id"],
-    })
-    row = {
-        "job_id": job["job_id"], "slug": job["slug"], "old_raw": _pin(raw),
-        "old_task": _pin(task), "old_review": _pin(review),
-        "old_schema_validated": _pin(validated), "note": _pin(Path(job["note_path"])),
-        "prompt": _pin(old_prompt), "pdf": _pin(pdf),
-        "source_record_id": "arxiv:testv1", "source_version": "v1",
-        "science_gate": "HOLD" if hold else "PASS",
-        "science_hold_reason": "mechanism unverified" if hold else "",
-    }
+    rows = []
+    for job in jobs:
+        name = str(job["slug"])
+        pdf = tmp_path / f"{name}.pdf"
+        pdf.write_bytes(b"%PDF-1.4\nsource\n")
+        old_dir = tmp_path / name / "old"
+        old_dir.mkdir(parents=True)
+        old_prompt = old_dir / "paper_card.md"
+        old_prompt.write_bytes(Path(job["prompt_path"]).read_bytes())
+        card = _card(job, card_id=f"card-{name}")
+        raw = _write(old_dir / "raw.json", {
+            "schema_version": "idea_factory.bulk_card_response.v1", "slug": "worker-" + name,
+            "note_sha256": job["note_sha256"], "prompt_sha256": job["prompt_sha256"],
+            "cards": [card], "empty_reason": "",
+        })
+        task = _write(old_dir / "task.json", {
+            "slug": "worker-" + name, "shard_id": "worker", "note_path": job["note_path"],
+            "note_sha256": job["note_sha256"], "prompt_path": str(old_prompt),
+            "prompt_sha256": job["prompt_sha256"], "source_pdf_path": str(pdf.resolve()),
+            "source_pdf_sha256": _sha(pdf), "output_path": str(raw.resolve()), "card_id": card["card_id"],
+            "source_aliases": [{"arxiv_id": name + "v1"}],
+        })
+        review = _write(old_dir / "review.json", {
+            "raw_path": str(raw.resolve()), "raw_sha256": _sha(raw),
+            "note_path": job["note_path"], "note_sha256": job["note_sha256"],
+            "source_pdf": {"path": str(pdf.resolve()), "sha256": _sha(pdf)},
+            "terminal_disposition": "SCHEMA_VALID",
+        })
+        validated = _write(old_dir / "schema_validated.json", {
+            "schema_version": "idea_factory.bulk_schema_validated_card.v1", "card": card,
+            "slug": "worker-" + name, "note_path": job["note_path"],
+            "note_sha256": job["note_sha256"], "prompt_sha256": job["prompt_sha256"],
+            "raw_result_sha256": _sha(raw), "record_id": card["card_id"],
+        })
+        rows.append({
+            "job_id": job["job_id"], "slug": name, "old_raw": _pin(raw),
+            "old_task": _pin(task), "old_review": _pin(review),
+            "old_schema_validated": _pin(validated), "note": _pin(Path(job["note_path"])),
+            "prompt": _pin(old_prompt), "pdf": _pin(pdf),
+            "source_record_id": f"arxiv:{name}v1", "source_version": "v1",
+            "science_gate": "HOLD" if hold else "PASS",
+            "science_hold_reason": "mechanism unverified" if hold else "",
+        })
     run_files = {name: _pin(run / rel) for name, rel in {
         "jobs": "cards/card_jobs.jsonl", "selection": "corpus/selection_manifest.jsonl",
         "rejected": "corpus/rejected_manifest.jsonl", "router_jobs": "corpus/router_jobs.jsonl",
@@ -75,9 +77,9 @@ def _fixture(tmp_path: Path, *, hold: bool = False) -> tuple[Path, Path, Path, d
     }.items()}
     allowlist = _write(tmp_path / "allowlist.json", {
         "schema_version": "private_card_transport_allowlist.v1", "run_path": str(run.resolve()),
-        "run_files": run_files, "rows": [row],
+        "run_files": run_files, "rows": rows,
     })
-    return run, allowlist, tmp_path / "candidate", row
+    return run, allowlist, tmp_path / "candidate", rows[0]
 
 
 def test_rewraps_card_without_changing_body_and_never_ingests(tmp_path: Path) -> None:
@@ -133,9 +135,32 @@ def test_tampered_raw_fails_before_output_and_preserves_source(tmp_path: Path) -
     raw = Path(row["old_raw"]["path"])
     raw.write_bytes(raw.read_bytes() + b" ")
     changed = raw.read_bytes()
-    with pytest.raises(ValueError, match="pinned SHA-256 mismatch"):
-        transport(run, allowlist, _sha(allowlist), output)
-    assert raw.read_bytes() == changed and not output.exists()
+    receipt = transport(run, allowlist, _sha(allowlist), output)
+    assert raw.read_bytes() == changed
+    assert receipt["ready_count"] == 0 and receipt["hold_count"] == 1
+
+
+@pytest.mark.parametrize("fault", ["bad_sha", "missing_file"])
+def test_one_bad_item_pin_holds_only_that_item(tmp_path: Path, fault: str) -> None:
+    run, allowlist, output, bad = _fixture(tmp_path, names=("alpha", "beta"))
+    good_row = json.loads(allowlist.read_text(encoding="utf-8"))["rows"][1]
+    good_raw = Path(good_row["old_raw"]["path"])
+    good_before = good_raw.read_bytes()
+    bad_raw = Path(bad["old_raw"]["path"])
+    if fault == "bad_sha":
+        bad_raw.write_bytes(bad_raw.read_bytes() + b" ")
+        bad_before = bad_raw.read_bytes()
+    else:
+        bad_raw.unlink()
+        bad_before = None
+    receipt = transport(run, allowlist, _sha(allowlist), output)
+    assert receipt["ready_count"] == 1 and receipt["hold_count"] == 1
+    candidate = json.loads((output / "paper_card_results.candidate.v1.jsonl").read_text().splitlines()[0])
+    assert candidate["job_id"] == good_row["job_id"]
+    ledger = [json.loads(line) for line in (output / "hold_ledger.v1.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {x["job_id"]: x["status"] for x in ledger} == {bad["job_id"]: "HOLD", good_row["job_id"]: "READY"}
+    assert good_raw.read_bytes() == good_before
+    assert (bad_raw.read_bytes() if bad_raw.exists() else None) == bad_before
 
 
 def test_old_empty_result_is_explicit_hold_not_candidate(tmp_path: Path) -> None:
@@ -197,12 +222,14 @@ def test_old_slug_must_be_shard_prefixed_new_slug(tmp_path: Path) -> None:
     assert receipt["ready_count"] == 0 and receipt["hold_count"] == 1
 
 
-def test_path_alias_rejected_before_output(tmp_path: Path) -> None:
+def test_path_alias_is_item_hold(tmp_path: Path) -> None:
     run, allowlist, output, _ = _fixture(tmp_path)
-    _rewrite_allowlist(allowlist, lambda value: value["rows"][0]["old_raw"].update(path=str(tmp_path / "old" / ".." / "old" / "raw.json")))
-    with pytest.raises(ValueError, match="path alias"):
-        transport(run, allowlist, _sha(allowlist), output)
-    assert not output.exists()
+    def alias(value: dict) -> None:
+        old = Path(value["rows"][0]["old_raw"]["path"])
+        value["rows"][0]["old_raw"]["path"] = str(old.parent / ".." / "old" / old.name)
+    _rewrite_allowlist(allowlist, alias)
+    receipt = transport(run, allowlist, _sha(allowlist), output)
+    assert receipt["ready_count"] == 0 and receipt["hold_count"] == 1
 
 
 def test_output_write_failure_never_publishes_candidate_or_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
