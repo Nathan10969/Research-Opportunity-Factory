@@ -106,6 +106,9 @@ def test_builder_rejects_wrong_staging_pin_before_output(tmp_path: Path) -> None
 @pytest.mark.skipif(not STAGING.is_file() or not (RUN / "cards" / "card_jobs.jsonl").is_file(),
                     reason="frozen old811 run is unavailable")
 def test_real_100_private_transport_keeps_all_card_objects_and_no_ingest(tmp_path: Path) -> None:
+    results = RUN / "results"
+    before_results = {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in results.rglob("*") if path.is_file()}
     digest = hashlib.sha256(STAGING.read_bytes()).hexdigest()
     build_old_corpus_allowlist(RUN, STAGING, digest, tmp_path / "built")
     allowlist = tmp_path / "built" / "transport_allowlist.v2.json"
@@ -118,7 +121,8 @@ def test_real_100_private_transport_keeps_all_card_objects_and_no_ingest(tmp_pat
     for candidate in candidates:
         raw = json.loads(Path(by_job[candidate["job_id"]]["old_raw"]["path"]).read_bytes())
         assert candidate["cards"] == raw["cards"]
-    assert not (RUN / "results").exists()
+    assert {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in results.rglob("*") if path.is_file()} == before_results
 
 
 def test_portable_old_worker_receipt_status_tamper_is_hold(tmp_path: Path) -> None:
